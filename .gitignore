@@ -193,6 +193,7 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+README.pypi.md
 
 # Cursor
 #  Cursor is an AI-powered code editor. `.cursorignore` specifies files/directories to
@@ -205,3 +206,4 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+.env

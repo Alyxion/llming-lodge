@@ -1,0 +1,57 @@
+Third-Party Software Notices and Licenses
+==========================================
+
+This directory contains third-party libraries and fonts bundled for
+offline/CSP-compatible use by the Chat static frontend.
+
+
+1. marked v15.0.12
+   ----------------
+   Markdown parser and compiler
+   Copyright (c) 2018+, MarkedJS; 2011-2018, Christopher Jeffrey
+   License: MIT
+   Homepage: https://github.com/markedjs/marked
+   Files: marked.min.js
+   Full license: LICENSES/marked-LICENSE
+
+
+2. DOMPurify v3.0.6
+   -----------------
+   XSS sanitizer for HTML, MathML, and SVG
+   Copyright 2023 Dr.-Ing. Mario Heiderich, Cure53
+   License: Apache-2.0 OR MPL-2.0
+   Homepage: https://github.com/cure53/DOMPurify
+   Files: purify.min.js
+   Full license: LICENSES/dompurify-LICENSE
+
+
+3. KaTeX v0.16.9
+   --------------
+   Fast math typesetting library for the web
+   Copyright (c) 2013-2020 Khan Academy and other contributors
+   License: MIT
+   Homepage: https://github.com/KaTeX/KaTeX
+   Files: katex.min.js, katex.min.css, fonts/KaTeX_*.woff2
+   Full license: LICENSES/katex-LICENSE
+
+   KaTeX bundles the following font families (all MIT-licensed as part
+   of the KaTeX distribution):
+     - KaTeX_AMS (based on AMSFonts by the American Mathematical Society)
+     - KaTeX_Caligraphic
+     - KaTeX_Fraktur
+     - KaTeX_Main (based on Computer Modern by Donald Knuth)
+     - KaTeX_Math
+     - KaTeX_SansSerif
+     - KaTeX_Script
+     - KaTeX_Size1-4
+     - KaTeX_Typewriter
+
+
+4. Material Icons
+   ----------------
+   Icon font by Google
+   Copyright Google LLC
+   License: Apache-2.0
+   Homepage: https://github.com/google/material-design-icons
+   Files: material-icons.css, fonts/MaterialIcons-Regular.woff2
+   Full license: LICENSES/material-icons-LICENSE

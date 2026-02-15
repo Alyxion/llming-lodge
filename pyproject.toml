@@ -1,0 +1,68 @@
+[tool.poetry]
+name = "llming-lodge"
+version = "0.1.0"
+description = "A cozy lodge where LLMings stream, use tools, and stay within budget"
+authors = ["Michael Ikemann"]
+license = "BUSL-1.1"
+readme = "README.pypi.md"
+repository = "https://github.com/Alyxion/llming-lodge"
+homepage = "https://github.com/Alyxion/llming-lodge"
+keywords = ["llm", "chat", "mcp", "streaming", "openai", "anthropic", "gemini"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Programming Language :: Python :: 3.14",
+]
+packages = [{include = "llming_lodge"}]
+
+[tool.poetry.urls]
+"Author" = "https://github.com/Alyxion"
+
+[tool.poetry.dependencies]
+python = "^3.14"
+
+# Core
+pydantic = "*"
+tiktoken = "*"
+
+# LLM providers
+openai = ">=2.14"
+anthropic = "*"
+google-genai = ">=1.56"
+
+# MCP (Model Context Protocol)
+mcp = ">=1.0"
+
+# Server
+fastapi = "*"
+starlette = "*"
+uvicorn = "*"
+
+# Document processing
+pdfplumber = ">=0.11"
+python-docx = ">=1.2"
+openpyxl = ">=3.1"
+
+# Budget persistence (optional)
+pymongo = ">=4.15"
+motor = ">=3.7"
+
+[tool.poetry.scripts]
+llming-lodge = "llming_lodge.standalone:main"
+
+[tool.poetry.group.dev.dependencies]
+pytest = ">=8.0"
+pytest-asyncio = ">=0.23"
+pytest-xdist = ">=3.5"
+pytest-timeout = ">=2.2"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.pytest.ini_options]
+addopts = "-n auto -m 'not regression'"
+markers = [
+    "regression: marks tests that perform full model testing with latency measurements",
+]

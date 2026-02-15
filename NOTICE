@@ -1,0 +1,45 @@
+LLMing-Lodge
+Copyright (c) 2025 Michael Ikemann. All Rights Reserved.
+
+Licensed under the Business Source License 1.1 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License in the file LICENSE in the
+root directory of this source tree.
+
+After the Change Date (4 years after each version's publication),
+each version becomes available under the Apache License 2.0.
+
+---
+
+This software includes the following third-party components:
+
+marked v15.0.12
+  Markdown parser and compiler
+  Copyright (c) 2018+, MarkedJS; 2011-2018, Christopher Jeffrey
+  License: MIT
+  https://github.com/markedjs/marked
+
+DOMPurify v3.0.6
+  XSS sanitizer for HTML, MathML, and SVG
+  Copyright (c) 2023 Dr.-Ing. Mario Heiderich, Cure53
+  License: Apache-2.0 OR MPL-2.0
+  https://github.com/cure53/DOMPurify
+
+KaTeX v0.16.9
+  Fast math typesetting library for the web
+  Copyright (c) 2013-2020 Khan Academy and other contributors
+  License: MIT
+  https://github.com/KaTeX/KaTeX
+  Includes font families based on AMSFonts (American Mathematical
+  Society) and Computer Modern (Donald Knuth).
+
+Material Icons
+  Icon font by Google
+  Copyright Google LLC
+  License: Apache-2.0
+  https://github.com/google/material-design-icons
+
+---
+
+Full license texts for vendored libraries are in:
+  llming_lodge/static/chat/vendor/LICENSES/
