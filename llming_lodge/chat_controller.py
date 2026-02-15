@@ -12,7 +12,7 @@ from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
 
 from llming_lodge import ChatSession, ChatHistory, LLMConfig, LLMManager
-from llming_lodge.budget import MemoryBudgetLimit, LimitPeriod
+from llming_lodge.budget import MemoryBudgetLimit, LimitPeriod, BudgetHandler
 from llming_lodge.budget.budget_limit import BudgetLimit
 from llming_lodge.budget.budget_manager import LLMBudgetManager
 from llming_lodge.llm_base_models import Role, ChatMessage
@@ -43,6 +43,8 @@ class ChatController(ABC):
         context_preamble: Optional[str] = None,
         mcp_servers: Optional[List[MCPServerConfig]] = None,
         initial_model: Optional[str] = None,
+        user_avatar: Optional[str] = None,
+        budget_handler: Optional[BudgetHandler] = None,
     ):
         """Initialize controller with configuration.
 
@@ -56,9 +58,13 @@ class ChatController(ABC):
                 in the editable prompt.
             mcp_servers: Optional MCP server configurations
             initial_model: Optional initial model (default: gpt-5.2)
+            user_avatar: Optional URL to the user's avatar image
+            budget_handler: Optional callback returning current BudgetInfo
         """
         self.user_id = user_id
         self.user_mail = user_mail or user_id
+        self.user_avatar = user_avatar or ""
+        self.budget_handler = budget_handler
         self.mcp_servers = mcp_servers or []
 
         # Get available models

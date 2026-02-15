@@ -22,6 +22,8 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
+from llming_lodge.server import API_PREFIX
+
 from llming_lodge.llm_base_models import Role
 
 logger = logging.getLogger(__name__)
@@ -92,7 +94,7 @@ def build_debug_router() -> APIRouter:
     from .chat_session_api import SessionRegistry
 
     router = APIRouter(
-        prefix="/api/llming-lodge/debug",
+        prefix=f"{API_PREFIX}/debug",
         dependencies=[Depends(_check_auth)],
     )
 

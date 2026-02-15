@@ -4,6 +4,7 @@
 
 :root {
   --chat-accent: #6366f1;
+  --chat-accent-rgb: 99, 102, 241;
   --chat-accent-light: #eef2ff;
   --chat-accent-hover: #4f46e5;
   /* Light mode sidebar */
@@ -41,7 +42,7 @@
   --chat-text: #e5e7eb;
   --chat-text-muted: #9ca3af;
   --chat-border: rgba(255,255,255,0.10);
-  --chat-accent-light: rgba(99,102,241,0.15);
+  --chat-accent-light: rgba(var(--chat-accent-rgb), 0.15);
   --chat-avatar-bg: #3b3b4f;
 }
 
@@ -163,6 +164,8 @@
   margin-bottom: 4px;
   user-select: none;
   -webkit-user-select: none;
+  border: 1.5px solid rgba(255, 255, 255, 0.12);
+  box-shadow: 0 0 0 0.5px rgba(0, 0, 0, 0.15);
 }
 
 .cv2-mini-sidebar.cv2-sidebar-open .cv2-mini-sidebar-avatar { display: none; }
@@ -371,6 +374,8 @@
   flex-shrink: 0;
   user-select: none;
   -webkit-user-select: none;
+  border: 1.5px solid rgba(255, 255, 255, 0.12);
+  box-shadow: 0 0 0 0.5px rgba(0, 0, 0, 0.15);
 }
 
 .cv2-sidebar-avatar img {
@@ -626,6 +631,13 @@
   padding-bottom: 60px;
 }
 
+.cv2-initial-view-logo {
+  height: 40px;
+  width: auto;
+  margin-bottom: 8px;
+  animation: cv2-greeting-in 0.5s ease-out both;
+}
+
 .cv2-initial-view h2 {
   font-size: 28px;
   font-weight: 700;
@@ -669,7 +681,7 @@
 
 .cv2-quick-action:hover {
   border-color: var(--chat-accent);
-  box-shadow: 0 2px 8px rgba(99,102,241,0.15);
+  box-shadow: 0 2px 8px rgba(var(--chat-accent-rgb), 0.15);
   transform: translateY(-1px);
 }
 
@@ -1132,7 +1144,7 @@
 
 .cv2-input-wrapper:focus-within {
   border-color: var(--chat-accent);
-  box-shadow: 0 0 0 3px rgba(99,102,241,0.12);
+  box-shadow: 0 0 0 3px rgba(var(--chat-accent-rgb), 0.12);
 }
 
 .cv2-input-wrapper.cv2-drag-active {

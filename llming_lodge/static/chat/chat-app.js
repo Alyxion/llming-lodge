@@ -300,9 +300,21 @@ class ChatApp {
     };
 
     this.render();
+    this._applyTheme();
     this.bindEvents();
     this.connectWebSocket();
     await this.refreshConversations();
+  }
+
+  _applyTheme() {
+    const t = this.config.theme;
+    if (!t?.accent) return;
+    const root = document.getElementById('chat-app');
+    if (!root) return;
+    root.style.setProperty('--chat-accent', t.accent);
+    if (t.accentRgb) root.style.setProperty('--chat-accent-rgb', t.accentRgb);
+    if (t.accentHover) root.style.setProperty('--chat-accent-hover', t.accentHover);
+    if (t.accentLight) root.style.setProperty('--chat-accent-light', t.accentLight);
   }
 
   // ── WebSocket ─────────────────────────────────────────
@@ -365,7 +377,10 @@ class ChatApp {
 
   handleSessionInit(msg) {
     this.sessionId = msg.session_id;
-    this.userName = msg.user_name;
+    this.fullName = msg.user_name || this.userName || '';
+    // Keep config userName (given/first name) for greeting; fall back to first word of full name
+    if (!this.userName) this.userName = this.fullName;
+    this.userAvatar = msg.user_avatar || this.config.userAvatar || '';
     this.models = msg.models || [];
     this.currentModel = msg.current_model;
     this.tools = msg.tools || [];
@@ -376,13 +391,13 @@ class ChatApp {
     this.maxOutputTokens = msg.max_output_tokens || 0;
     this.quickActions = msg.quick_actions || [];
 
-    // Update greeting with actual user name
-    const firstName = this.userName?.split(' ')[0] || 'there';
-    if (this.el.greeting) this.el.greeting.textContent = `Hello ${firstName}, how can I help you?`;
-    if (this.el.sidebarUserName) this.el.sidebarUserName.textContent = this.userName || 'User';
+    // Greeting uses config userName (given name); sidebar shows full name
+    const greetName = this.userName || 'there';
+    if (this.el.greeting) this.el.greeting.textContent = `Hello ${greetName}, how can I help you?`;
+    if (this.el.sidebarUserName) this.el.sidebarUserName.textContent = this.fullName || 'User';
 
     this.updateModelButton();
-    this.updateBudget();
+    this._updateAvatarTooltip();
     this.updateSettings();
     this._renderQuickActions();
   }
@@ -626,8 +641,8 @@ class ChatApp {
   }
 
   handleBudgetUpdate(msg) {
-    this.budget = msg.available;
-    this.updateBudget();
+    this.budget = msg.budget;
+    this._updateAvatarTooltip();
   }
 
   handleChatCleared(msg) {
@@ -863,7 +878,7 @@ class ChatApp {
       <!-- Full sidebar -->
       <div class="cv2-sidebar cv2-hidden" id="cv2-sidebar">
         <div class="cv2-sidebar-header">
-          <span class="cv2-sidebar-title">Conversations</span>
+          ${this.config.appLogo ? `<img src="${this._escAttr(this.config.appLogo)}" alt="">` : `<span class="cv2-sidebar-title">${this._escHtml(this.config.appTitle || 'Conversations')}</span>`}
           <button class="cv2-sidebar-close-btn" id="cv2-sidebar-close">
             <span class="material-icons" style="font-size:20px">close</span>
           </button>
@@ -904,6 +919,7 @@ class ChatApp {
         <div class="cv2-chat-wrapper">
           <!-- Initial view -->
           <div class="cv2-initial-view" id="cv2-initial-view">
+            ${this.config.appLogo ? `<img class="cv2-initial-view-logo" src="${this._escAttr(this.config.appLogo)}" alt="">` : ''}
             <h2 id="cv2-greeting"></h2>
             <p class="cv2-subtitle">Choose a topic or type your own message below</p>
             <div class="cv2-quick-actions" id="cv2-quick-actions"></div>
@@ -990,8 +1006,8 @@ class ChatApp {
     };
 
     // Set greeting & user name
-    const firstName = this.userName.split(' ')[0] || 'there';
-    this.el.greeting.textContent = `Hello ${firstName}, how can I help you?`;
+    const greetName = this.userName || 'there';
+    this.el.greeting.textContent = `Hello ${greetName}, how can I help you?`;
     this.el.sidebarUserName.textContent = this.userName || 'User';
 
     // Quick action cards (rendered after session_init provides them)
@@ -1215,13 +1231,21 @@ class ChatApp {
     });
   }
 
-  updateBudget() {
+  _updateAvatarTooltip() {
+    const root = document.getElementById('chat-app');
+    if (!root) return;
+    const name = this.fullName || this.userName || '';
+    let tip = name;
     if (this.config.showBudget && this.budget !== undefined && this.budget > 0) {
-      this.el.budget.textContent = `Budget: $${Number(this.budget).toFixed(2)}`;
-      this.el.budget.style.display = '';
-    } else {
-      this.el.budget.style.display = 'none';
+      tip += `\nBudget: $${Number(this.budget).toFixed(2)}`;
     }
+    // Update both mini and full sidebar avatars
+    const miniAvatar = root.querySelector('.cv2-mini-sidebar-avatar');
+    if (miniAvatar) miniAvatar.title = tip;
+    const sidebarAvatar = root.querySelector('.cv2-sidebar-avatar');
+    if (sidebarAvatar) sidebarAvatar.title = tip;
+    // Hide standalone budget element — budget now lives in context popover + avatar tooltip
+    if (this.el.budget) this.el.budget.style.display = 'none';
   }
 
   updateSettings() {
@@ -1435,7 +1459,7 @@ class ChatApp {
 
   _renderContextPopover() {
     const info = this.contextInfo || {};
-    this.el.contextPopover.innerHTML = `
+    let html = `
       <div class="cv2-context-row"><span>History</span><strong>${(info.historyTokens || 0).toLocaleString()} tokens</strong></div>
       <div class="cv2-context-row"><span>Documents</span><strong>${(info.docTokens || 0).toLocaleString()} tokens</strong></div>
       <div class="cv2-context-row"><span>Images</span><strong>${(info.imageTokens || 0).toLocaleString()} tokens</strong></div>
@@ -1443,8 +1467,12 @@ class ChatApp {
       <div class="cv2-context-row" style="border-top:1px solid #e5e7eb;padding-top:6px;margin-top:4px">
         <span>Total</span><strong>${(info.totalTokens || 0).toLocaleString()} / ${(info.maxTokens || 0).toLocaleString()}</strong>
       </div>
-      <div class="cv2-context-row"><span>Est. cost</span><strong>$${info.estCost || '0.00'}</strong></div>
-    `;
+      <div class="cv2-context-row"><span>Est. cost</span><strong>$${info.estCost || '0.00'}</strong></div>`;
+    if (this.config.showBudget && this.budget !== undefined && this.budget > 0) {
+      html += `
+      <div class="cv2-context-row"><span>Budget</span><strong>$${Number(this.budget).toFixed(2)}</strong></div>`;
+    }
+    this.el.contextPopover.innerHTML = html;
   }
 
   // ── Conversations Sidebar ─────────────────────────────
@@ -1847,7 +1875,7 @@ class ChatApp {
     this._renderAttachments();
 
     // Also post to server (so server can include with next message)
-    fetch(`/api/llming-lodge/image-paste/${this.sessionId}`, {
+    fetch(`/api/llming/image-paste/${this.sessionId}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ images: this._pendingImages.map(d => d.split(',')[1]) }),
@@ -1858,7 +1886,7 @@ class ChatApp {
     this._pendingImages.splice(index, 1);
     this._renderAttachments();
     // Update server
-    fetch(`/api/llming-lodge/image-paste/${this.sessionId}`, {
+    fetch(`/api/llming/image-paste/${this.sessionId}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ images: this._pendingImages.map(d => d.split(',')[1]) }),
@@ -1973,7 +2001,7 @@ class ChatApp {
     for (const f of files) formData.append('files', f);
 
     try {
-      const res = await fetch(`/api/llming-lodge/upload/${this.sessionId}`, {
+      const res = await fetch(`/api/llming/upload/${this.sessionId}`, {
         method: 'POST',
         headers: { 'X-User-Id': this.config.userId },
         body: formData,

@@ -11,10 +11,12 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 # API path constants
-API_PREFIX = "/api/llming-lodge"
+API_PREFIX = "/api/llming"
+STATIC_PREFIX = "/llming-static"
 API_UPLOAD = f"{API_PREFIX}/upload"
 API_IMAGE_PASTE = f"{API_PREFIX}/image-paste"
 API_LOAD_CONVERSATION = f"{API_PREFIX}/load-conversation"
+ASSET_URL_PREFIX = f"{API_PREFIX}/asset"
 
 
 class SessionDataStore:
@@ -86,6 +88,35 @@ class SessionDataStore:
     def pop_pending_load(cls, session_id: str) -> Optional[dict]:
         with cls._lock:
             return cls._pending_loads.pop(session_id, None)
+
+
+def build_theme_css(accent: str) -> str:
+    """Generate CSS overrides for the chat theme accent color.
+
+    Args:
+        accent: Hex color string, e.g. '#003D8F'
+
+    Returns:
+        CSS string that overrides the chat accent variables for both
+        light and dark mode.
+    """
+    hex_color = accent.lstrip('#')
+    r, g, b = int(hex_color[0:2], 16), int(hex_color[2:4], 16), int(hex_color[4:6], 16)
+
+    # Darken by ~25% for hover state
+    hover_r = max(0, int(r * 0.75))
+    hover_g = max(0, int(g * 0.75))
+    hover_b = max(0, int(b * 0.75))
+    hover_hex = f"#{hover_r:02x}{hover_g:02x}{hover_b:02x}"
+
+    return (
+        f":root, #chat-app.cv2-dark {{\n"
+        f"  --chat-accent: {accent};\n"
+        f"  --chat-accent-rgb: {r}, {g}, {b};\n"
+        f"  --chat-accent-hover: {hover_hex};\n"
+        f"  --chat-accent-light: rgba({r}, {g}, {b}, 0.12);\n"
+        f"}}"
+    )
 
 
 def get_static_path() -> str:
@@ -260,3 +291,23 @@ def get_ws_router():
     Includes: file upload, image paste, conversation load, assets, WS chat.
     """
     return build_http_router()
+
+
+def setup_routes(app, *, debug: bool = False) -> None:
+    """Mount all llming-lodge routes (static files + API) on a Starlette/FastAPI app.
+
+    Framework-agnostic — works with any app that supports ``.mount()``
+    and ``.include_router()`` (FastAPI, Starlette, NiceGUI).
+    """
+    from starlette.staticfiles import StaticFiles
+
+    app.mount(STATIC_PREFIX, StaticFiles(directory=get_static_path()), name="llming-static")
+    app.mount("/chat-static", StaticFiles(directory=get_chat_static_path()), name="chat-static")
+    app.include_router(build_http_router())
+
+    if debug:
+        try:
+            from llming_lodge.api.debug_api import build_debug_router
+            app.include_router(build_debug_router())
+        except Exception as e:
+            logger.warning(f"[CHAT] Failed to load debug API: {e}")

@@ -387,7 +387,7 @@ class MCPInProcessConnection(MCPConnection):
 
     async def list_tools(self) -> List[ToolDefinition]:
         """List available tools from the in-process server."""
-        from .tool_definition import ToolUIMetadata
+        from llming_lodge.tools.tool_definition import ToolUIMetadata
 
         raw_tools = await self.server.list_tools()
         tools = []

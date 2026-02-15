@@ -1,4 +1,15 @@
+from typing import Callable, Optional, TypedDict
+
 from .time_intervals import TimeInterval as LimitPeriod
+
+
+class BudgetInfo(TypedDict, total=False):
+    """Budget information returned by a BudgetHandler callback."""
+    available: float
+    reserved: float
+
+
+BudgetHandler = Callable[[], BudgetInfo]
 
 class InsufficientBudgetError(Exception):
     """Raised when there is not enough budget available for the requested operation."""

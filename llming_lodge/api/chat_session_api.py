@@ -20,6 +20,7 @@ from uuid import uuid4
 from starlette.websockets import WebSocket, WebSocketDisconnect, WebSocketState
 
 from llming_lodge import ChatSession, ChatHistory, LLMManager
+from llming_lodge.budget import BudgetHandler
 from llming_lodge.budget.budget_limit import BudgetLimit
 from llming_lodge.llm_base_models import Role, ChatMessage
 from llming_lodge.tools.tool_call import ToolCallInfo, ToolCallStatus
@@ -42,6 +43,7 @@ class SessionEntry:
     controller: "WebSocketChatController"
     user_id: str
     user_name: str = ""
+    user_avatar: str = ""
     websocket: Optional[WebSocket] = None
     created_at: float = field(default_factory=time.monotonic)
     last_activity: float = field(default_factory=time.monotonic)
@@ -70,12 +72,14 @@ class SessionRegistry:
         controller: "WebSocketChatController",
         user_id: str,
         user_name: str = "",
+        user_avatar: str = "",
         mcp_servers: Optional[List[MCPServerConfig]] = None,
     ) -> SessionEntry:
         entry = SessionEntry(
             controller=controller,
             user_id=user_id,
             user_name=user_name,
+            user_avatar=user_avatar,
             upload_manager=UploadManager.create(session_id, user_id),
             mcp_servers=mcp_servers,
         )
@@ -132,6 +136,9 @@ class WebSocketChatController(ChatController):
         context_preamble: Optional[str] = None,
         mcp_servers: Optional[List[MCPServerConfig]] = None,
         initial_model: Optional[str] = None,
+        user_avatar: Optional[str] = None,
+        budget_handler: Optional[BudgetHandler] = None,
+        quick_actions: Optional[List[dict]] = None,
     ):
         super().__init__(
             user_id=user_id,
@@ -141,12 +148,15 @@ class WebSocketChatController(ChatController):
             context_preamble=context_preamble,
             mcp_servers=mcp_servers,
             initial_model=initial_model,
+            user_avatar=user_avatar,
+            budget_handler=budget_handler,
         )
         self.session_id = session_id
         self._ws: Optional[WebSocket] = None
         self._base_system_prompt = system_prompt or self.system_prompt
         self._conversation_title: Optional[str] = None
         self._title_msg_count: int = 0
+        self._custom_quick_actions: Optional[List[dict]] = quick_actions
 
     def set_websocket(self, ws: WebSocket) -> None:
         self._ws = ws
@@ -232,7 +242,7 @@ class WebSocketChatController(ChatController):
         asyncio.create_task(self._post_response_tasks())
 
     async def _post_response_tasks(self) -> None:
-        """After response: generate title, save conversation, send context info."""
+        """After response: generate title, save conversation, send context info, budget update."""
         try:
             await self._generate_title()
         except Exception as e:
@@ -247,6 +257,16 @@ class WebSocketChatController(ChatController):
 
         try:
             await self._send_context_info()
+        except Exception:
+            pass
+
+        # Send updated budget
+        try:
+            budget = self.available_budget
+            if self.budget_handler:
+                info = self.budget_handler()
+                budget = info.get("available", budget)
+            await self._send({"type": "budget_update", "budget": budget})
         except Exception:
             pass
 
@@ -538,57 +558,26 @@ class WebSocketChatController(ChatController):
                 "highlights": info.highlights,
             })
 
-        quick_actions = [
-            {
-                "id": "@sys.docs",
-                "label": "Analyze a document",
-                "desc": "Upload PDFs, Word, or Excel files",
-                "icon": "description",
-                "engagement": "I'd like to analyze a document.",
-                "prompt": "You are a document analyst. Help the user understand, summarize, and extract insights from uploaded documents. Ask clarifying questions about what they need.",
-            },
-            {
-                "id": "@sys.image",
-                "label": "Create an image",
-                "desc": "Generate images from your description",
-                "icon": "palette",
-                "engagement": "I want to create an image.",
-                "prompt": "You are a creative image generator. Help the user describe and generate images. Ask about style, subject, mood, and details to create the perfect image. Start by asking what they want to visualize.",
-            },
-            {
-                "id": "@sys.ideas",
-                "label": "Brainstorm ideas",
-                "desc": "Explore concepts and strategies",
-                "icon": "lightbulb",
-                "engagement": "I'd like to brainstorm ideas.",
-                "prompt": "You are a creative consultant. Help the user brainstorm. Start by asking what topic or challenge they want to explore, then guide them with questions and suggestions.",
-            },
-            {
-                "id": "@sys.code",
-                "label": "Write code",
-                "desc": "Build scripts, apps, and automations",
-                "icon": "code",
-                "engagement": "I need help writing code.",
-                "prompt": "You are a coding assistant. Help the user write code. Start by asking what they want to build, which language, and any constraints. Then guide them step by step.",
-            },
-            {
-                "id": "@sys.summary",
-                "label": "Summarize text",
-                "desc": "Condense articles, notes, or reports",
-                "icon": "summarize",
-                "engagement": "I need to summarize something.",
-                "prompt": "You are a summary assistant. Help the user condense text. Start by asking them to paste or upload the text they want summarized, and what format they prefer (bullet points, paragraph, key takeaways).",
-            },
-        ]
+        quick_actions = self._custom_quick_actions or []
+
+        # Resolve budget: prefer budget_handler if set
+        budget = self.available_budget
+        if self.budget_handler:
+            try:
+                info = self.budget_handler()
+                budget = info.get("available", budget)
+            except Exception as e:
+                logger.debug(f"[BUDGET] budget_handler failed: {e}")
 
         return {
             "type": "session_init",
             "session_id": self.session_id,
             "user_name": user_name,
+            "user_avatar": self.user_avatar,
             "models": models,
             "current_model": self.model,
             "tools": self.get_all_known_tools(),
-            "budget": self.available_budget,
+            "budget": budget,
             "system_prompt": self._base_system_prompt or self.system_prompt,
             "temperature": self.temperature,
             "max_input_tokens": self.max_input_tokens,
@@ -604,7 +593,8 @@ def build_ws_router():
     """Build a FastAPI APIRouter with the WebSocket chat endpoint."""
     from fastapi import APIRouter
 
-    router = APIRouter(prefix="/api/llming-lodge")
+    from llming_lodge.server import API_PREFIX
+    router = APIRouter(prefix=API_PREFIX)
 
     @router.websocket("/ws/{session_id}")
     async def websocket_chat(ws: WebSocket, session_id: str):

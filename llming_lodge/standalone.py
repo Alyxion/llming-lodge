@@ -99,7 +99,7 @@ def create_app():
     from fastapi.staticfiles import StaticFiles
 
     from llming_lodge.api.chat_session_api import SessionRegistry, WebSocketChatController
-    from llming_lodge.server import get_static_path, get_chat_static_path, get_ws_router
+    from llming_lodge.server import get_static_path, get_chat_static_path, get_ws_router, API_PREFIX, STATIC_PREFIX
 
     @asynccontextmanager
     async def lifespan(_a):
@@ -114,7 +114,7 @@ def create_app():
 
     _app = FastAPI(title="llming-lodge Chat", docs_url=None, redoc_url=None, lifespan=lifespan)
 
-    _app.mount("/llming-lodge-static", StaticFiles(directory=get_static_path()), name="llming-lodge-static")
+    _app.mount(STATIC_PREFIX, StaticFiles(directory=get_static_path()), name="llming-static")
     _app.mount("/chat-static", StaticFiles(directory=get_chat_static_path()), name="chat-static")
     _app.include_router(get_ws_router())
 
@@ -164,11 +164,11 @@ def create_app():
 
         config = {
             "sessionId": session_id,
-            "wsPath": f"/api/llming-lodge/ws/{session_id}",
+            "wsPath": f"{API_PREFIX}/ws/{session_id}",
             "userName": "User",
             "userEmail": "",
             "userId": "standalone",
-            "staticBase": "/llming-lodge-static",
+            "staticBase": STATIC_PREFIX,
         }
 
         return HTMLResponse(index_html.replace("{config_json}", json.dumps(config)))
