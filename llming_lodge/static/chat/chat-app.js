@@ -276,6 +276,7 @@ class ChatApp {
     this.sidebarVisible = false;
     this.modelDropdownOpen = false;
     this.plusMenuOpen = false;
+    this.suggestionsMenuOpen = false;
     this.contextPopoverOpen = false;
 
     // Conversation sidebar
@@ -651,11 +652,14 @@ class ChatApp {
     this.el.messages.innerHTML = '';
     this.el.initialView.style.display = 'flex';
     this.el.messagesWrap.classList.add('cv2-messages-wrap-hidden');
+    const wrapper = this.el.initialView.closest('.cv2-chat-wrapper');
+    if (wrapper) wrapper.classList.add('cv2-initial-mode');
     this.activeConvId = '';
     this._pendingImages = [];
     this._pendingFiles = [];
     this._renderAttachments();
     this.refreshConversations();
+    this._startPlaceholderCycle();
   }
 
   handleUserMessage(msg) {
@@ -837,14 +841,36 @@ class ChatApp {
 
     // For all other actions: send silently and let the AI engage the user
     if (!this.chatVisible) this.showChat();
-    this.ws.send({ type: 'send_message', text: qa.engagement || qa.label });
+    const inputText = this.el.textarea.value.trim();
+    if (inputText && qa.textPrefix) {
+      // Text in the input box + action has a text prefix — act on it immediately
+      this.el.textarea.value = '';
+      this.el.textarea.style.height = 'auto';
+      const fullText = `${qa.textPrefix}\n\n${inputText}`;
+      // Show as user bubble in chat
+      const userEl = document.createElement('div');
+      userEl.className = 'cv2-msg-user';
+      userEl.innerHTML = `<div class="cv2-msg-user-bubble">${this.md.render(fullText)}</div>`;
+      this.el.messages.appendChild(userEl);
+      this.ws.send({ type: 'send_message', text: fullText });
+    } else {
+      this.ws.send({ type: 'send_message', text: qa.engagement || qa.label });
+    }
     this._scrollToBottom();
   }
 
   showChat() {
     this.chatVisible = true;
+    this._stopPlaceholderCycle();
     this.el.initialView.style.display = 'none';
     this.el.messagesWrap.classList.remove('cv2-messages-wrap-hidden');
+    const wrapper = this.el.initialView.closest('.cv2-chat-wrapper');
+    if (wrapper) wrapper.classList.remove('cv2-initial-mode');
+    const inputArea = wrapper?.querySelector('.cv2-input-area');
+    if (inputArea) {
+      inputArea.classList.add('cv2-input-animating');
+      inputArea.addEventListener('animationend', () => inputArea.classList.remove('cv2-input-animating'), { once: true });
+    }
     this.el.textarea.focus();
   }
 
@@ -878,9 +904,10 @@ class ChatApp {
       <!-- Full sidebar -->
       <div class="cv2-sidebar cv2-hidden" id="cv2-sidebar">
         <div class="cv2-sidebar-header">
-          ${this.config.appLogo ? `<img src="${this._escAttr(this.config.appLogo)}" alt="">` : `<span class="cv2-sidebar-title">${this._escHtml(this.config.appTitle || 'Conversations')}</span>`}
+          ${this.config.appLogo ? `<img class="cv2-sidebar-logo" src="${this._escAttr(this.config.appLogo)}" alt="">` : ''}
+          <span class="cv2-sidebar-title">${this._escHtml(this.config.appTitle || 'Conversations')}</span>
           <button class="cv2-sidebar-close-btn" id="cv2-sidebar-close">
-            <span class="material-icons" style="font-size:20px">close</span>
+            <span class="material-icons" style="font-size:18px">close</span>
           </button>
         </div>
         <button class="cv2-new-chat-btn" id="cv2-new-chat">
@@ -908,21 +935,18 @@ class ChatApp {
           <button class="cv2-topbar-btn" id="cv2-sidebar-toggle" style="display:none">
             <span class="material-icons">menu</span>
           </button>
-          <div style="position:relative">
-            <button class="cv2-model-btn" id="cv2-model-btn"></button>
-            <div class="cv2-model-dropdown" id="cv2-model-dropdown"></div>
-          </div>
+          ${this.config.appLogo ? `<img class="cv2-topbar-logo" src="${this._escAttr(this.config.appLogo)}" alt="">` : ''}
           <div style="flex:1"></div>
         </div>
 
         <!-- Chat wrapper -->
-        <div class="cv2-chat-wrapper">
+        <div class="cv2-chat-wrapper cv2-initial-mode">
           <!-- Initial view -->
           <div class="cv2-initial-view" id="cv2-initial-view">
-            ${this.config.appLogo ? `<img class="cv2-initial-view-logo" src="${this._escAttr(this.config.appLogo)}" alt="">` : ''}
-            <h2 id="cv2-greeting"></h2>
-            <p class="cv2-subtitle">Choose a topic or type your own message below</p>
-            <div class="cv2-quick-actions" id="cv2-quick-actions"></div>
+            <div class="cv2-greeting-row">
+              ${this.config.appMascot ? `<img class="cv2-mascot" src="${this._escAttr(this.config.appMascot)}" alt="">` : ''}
+              <h2 id="cv2-greeting"></h2>
+            </div>
           </div>
 
           <!-- Messages -->
@@ -935,7 +959,14 @@ class ChatApp {
             <div class="cv2-input-wrapper" id="cv2-input-wrapper">
               <div class="cv2-attachments" id="cv2-attachments" style="display:none"></div>
               <div class="cv2-input-top">
-                <textarea class="cv2-textarea" id="cv2-textarea" placeholder="Message..." rows="1"></textarea>
+                <div class="cv2-ph-overlay" id="cv2-ph-overlay">
+                  <span class="cv2-ph-text-wrap">
+                    <span class="cv2-ph-text cv2-ph-current" id="cv2-ph-current"></span>
+                    <span class="cv2-ph-text cv2-ph-next" id="cv2-ph-next"></span>
+                  </span>
+                  <button class="cv2-ph-action-btn" id="cv2-ph-action-btn"><span class="material-icons">auto_awesome</span></button>
+                </div>
+                <textarea class="cv2-textarea" id="cv2-textarea" rows="1"></textarea>
               </div>
               <input type="file" id="cv2-file-input" multiple accept="image/*,.pdf,.docx,.xlsx,.doc,.xls" style="display:none">
               <div class="cv2-input-bottom">
@@ -943,7 +974,15 @@ class ChatApp {
                   <span class="material-icons">add</span>
                 </button>
                 <div class="cv2-plus-menu" id="cv2-plus-menu"></div>
+                <button class="cv2-input-btn" id="cv2-suggestions-btn" title="Suggestions">
+                  <span class="material-icons">auto_awesome</span>
+                </button>
+                <div class="cv2-suggestions-menu" id="cv2-suggestions-menu"></div>
                 <div style="flex:1"></div>
+                <div style="position:relative">
+                  <button class="cv2-model-btn" id="cv2-model-btn"></button>
+                  <div class="cv2-model-dropdown" id="cv2-model-dropdown"></div>
+                </div>
                 <div class="cv2-context-circle" id="cv2-context-circle" title="Context usage">
                   <svg viewBox="0 0 36 36">
                     <circle class="cv2-bg" cx="18" cy="18" r="15.9"/>
@@ -995,6 +1034,12 @@ class ChatApp {
       textarea: root.querySelector('#cv2-textarea'),
       plusBtn: root.querySelector('#cv2-plus-btn'),
       plusMenu: root.querySelector('#cv2-plus-menu'),
+      suggestionsBtn: root.querySelector('#cv2-suggestions-btn'),
+      suggestionsMenu: root.querySelector('#cv2-suggestions-menu'),
+      phOverlay: root.querySelector('#cv2-ph-overlay'),
+      phCurrent: root.querySelector('#cv2-ph-current'),
+      phNext: root.querySelector('#cv2-ph-next'),
+      phActionBtn: root.querySelector('#cv2-ph-action-btn'),
       contextCircle: root.querySelector('#cv2-context-circle'),
       contextFg: root.querySelector('#cv2-context-fg'),
       contextPct: root.querySelector('#cv2-context-pct'),
@@ -1074,6 +1119,13 @@ class ChatApp {
       this.el.plusMenu.classList.toggle('cv2-visible', this.plusMenuOpen);
     });
 
+    // Suggestions menu
+    this.el.suggestionsBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      this.suggestionsMenuOpen = !this.suggestionsMenuOpen;
+      this.el.suggestionsMenu.classList.toggle('cv2-visible', this.suggestionsMenuOpen);
+    });
+
     // Context popover
     this.el.contextCircle.addEventListener('click', (e) => {
       e.stopPropagation();
@@ -1091,6 +1143,8 @@ class ChatApp {
       this.el.modelDropdown.style.display = 'none';
       this.plusMenuOpen = false;
       this.el.plusMenu.classList.remove('cv2-visible');
+      this.suggestionsMenuOpen = false;
+      this.el.suggestionsMenu.classList.remove('cv2-visible');
       this.contextPopoverOpen = false;
       this.el.contextPopover.classList.remove('cv2-visible');
     });
@@ -1098,22 +1152,9 @@ class ChatApp {
     // Export all
     this.el.exportAll.addEventListener('click', () => this._exportAll());
 
-    // Clear all
-    let clearConfirm = false;
-    let clearTimeout2;
+    // Clear all — show inline confirmation dialog
     this.el.clearAll.addEventListener('click', () => {
-      if (clearConfirm) {
-        this._clearAllConversations();
-        clearConfirm = false;
-        this.el.clearAll.textContent = 'Clear all';
-      } else {
-        clearConfirm = true;
-        this.el.clearAll.textContent = 'Confirm?';
-        clearTimeout2 = setTimeout(() => {
-          clearConfirm = false;
-          this.el.clearAll.textContent = 'Clear all';
-        }, 3000);
-      }
+      this._showClearAllDialog();
     });
 
     // Drag & drop on input
@@ -1150,35 +1191,136 @@ class ChatApp {
   // ── UI Updates ────────────────────────────────────────
 
   _renderQuickActions() {
-    const container = document.getElementById('cv2-quick-actions');
+    const container = this.el.suggestionsMenu;
     if (!container) return;
     container.innerHTML = this.quickActions.map(qa => `
-      <button class="cv2-quick-action" data-qa-id="${this._escAttr(qa.id)}">
+      <button class="cv2-menu-item cv2-suggestion-item" data-qa-id="${this._escAttr(qa.id)}">
         <span class="material-icons">${qa.icon}</span>
-        <div class="cv2-qa-text">
-          <div class="cv2-qa-label">${this._escHtml(qa.label)}</div>
-          ${qa.desc ? `<div class="cv2-qa-desc">${this._escHtml(qa.desc)}</div>` : ''}
-        </div>
+        ${this._escHtml(qa.label)}
       </button>
     `).join('');
-    container.querySelectorAll('.cv2-quick-action').forEach(btn => {
+    container.querySelectorAll('.cv2-suggestion-item').forEach(btn => {
       btn.addEventListener('click', () => {
         const qa = this.quickActions.find(q => q.id === btn.dataset.qaId);
-        if (qa) this._triggerQuickAction(qa);
+        if (qa) {
+          this._closeSuggestionsMenu();
+          this._triggerQuickAction(qa);
+        }
       });
     });
+
+    // Start cycling placeholder hints
+    this._startPlaceholderCycle();
+  }
+
+  _startPlaceholderCycle() {
+    this._stopPlaceholderCycle();
+    if (!this.quickActions.length) return;
+    // Random start
+    this._placeholderIdx = Math.floor(Math.random() * this.quickActions.length);
+    const ov = this.el.phOverlay;
+    const cur = this.el.phCurrent;
+    const nxt = this.el.phNext;
+    if (!ov || !cur || !nxt) return;
+
+    // IDs that get an action button
+    this._actionableQAs = new Set(['@sys.docs', '@sys.image']);
+
+    // Show first hint immediately
+    cur.textContent = `${this.quickActions[this._placeholderIdx].label}...`;
+    cur.style.opacity = '1';
+    nxt.style.opacity = '0';
+    this._updatePhOverlayVisibility();
+    this._updatePhActionBtn();
+
+    // Hide overlay when user types or focuses
+    this.el.textarea.addEventListener('input', () => this._updatePhOverlayVisibility());
+    this.el.textarea.addEventListener('focus', () => { if (this.el.phOverlay) this.el.phOverlay.style.display = 'none'; });
+    this.el.textarea.addEventListener('blur', () => this._updatePhOverlayVisibility());
+
+    // Action button triggers only the current actionable quick action
+    this.el.phActionBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const qa = this.quickActions[this._placeholderIdx];
+      if (qa && this._actionableQAs.has(qa.id)) this._triggerQuickAction(qa);
+    });
+
+    // Start cycling after initial delay
+    this._placeholderDelay = setTimeout(() => {
+      this._placeholderTimer = setInterval(() => {
+        if (this.el.textarea.value.trim() || this.chatVisible) return;
+        // Prepare next text — skip if both current and next are actionable
+        const prevIdx = this._placeholderIdx;
+        let nextIdx = (prevIdx + 1) % this.quickActions.length;
+        const prevActionable = this._actionableQAs.has(this.quickActions[prevIdx].id);
+        const nextActionable = this._actionableQAs.has(this.quickActions[nextIdx].id);
+        if (prevActionable && nextActionable) {
+          nextIdx = (nextIdx + 1) % this.quickActions.length;
+        }
+        this._placeholderIdx = nextIdx;
+        nxt.textContent = `${this.quickActions[this._placeholderIdx].label}...`;
+        // Crossfade: current out, next in — simultaneously
+        cur.style.opacity = '0';
+        nxt.style.opacity = '1';
+        this._updatePhActionBtn();
+        // After transition completes, swap roles
+        setTimeout(() => {
+          cur.textContent = nxt.textContent;
+          cur.style.opacity = '1';
+          nxt.style.opacity = '0';
+          // Reset transition so the swap is instant (no animation)
+          cur.style.transition = 'none';
+          nxt.style.transition = 'none';
+          requestAnimationFrame(() => {
+            cur.style.transition = '';
+            nxt.style.transition = '';
+          });
+        }, 800);
+      }, 8000);
+    }, 2500);
+  }
+
+  _stopPlaceholderCycle() {
+    if (this._placeholderTimer) {
+      clearInterval(this._placeholderTimer);
+      this._placeholderTimer = null;
+    }
+    if (this._placeholderDelay) {
+      clearTimeout(this._placeholderDelay);
+      this._placeholderDelay = null;
+    }
+    if (this.el?.phOverlay) {
+      this.el.phOverlay.style.display = 'none';
+    }
+  }
+
+  _updatePhOverlayVisibility() {
+    if (!this.el?.phOverlay) return;
+    this.el.phOverlay.style.display = this.el.textarea.value.trim() ? 'none' : '';
+  }
+
+  _updatePhActionBtn() {
+    if (!this.el?.phOverlay || !this._actionableQAs) return;
+    const qa = this.quickActions[this._placeholderIdx];
+    const show = qa && this._actionableQAs.has(qa.id);
+    this.el.phOverlay.classList.toggle('cv2-ph-has-action', show);
+  }
+
+  _closeSuggestionsMenu() {
+    this.suggestionsMenuOpen = false;
+    this.el.suggestionsMenu.classList.remove('cv2-visible');
   }
 
   updateModelButton() {
     const info = this.models.find(m => m.model === this.currentModel);
     if (!info) {
-      this.el.modelBtn.innerHTML = `<span>${this._escHtml(this.currentModel)}</span><span class="material-icons" style="font-size:16px;color:#9ca3af">expand_more</span>`;
+      this.el.modelBtn.innerHTML = `<span>${this._escHtml(this.currentModel)}</span><span class="material-icons" style="font-size:14px;color:#9ca3af">expand_more</span>`;
       return;
     }
     this.el.modelBtn.innerHTML = `
       <img src="${this.config.staticBase}/${info.icon}" alt="">
       <span>${this._escHtml(info.label)}</span>
-      <span class="material-icons" style="font-size:16px;color:#9ca3af">expand_more</span>
+      <span class="material-icons" style="font-size:14px;color:#9ca3af">expand_more</span>
     `;
 
     // Update dropdown with comparison bars, sorted by popularity
@@ -2036,6 +2178,29 @@ class ChatApp {
     } catch (err) {
       console.error('[Export] Failed:', err);
     }
+  }
+
+  _showClearAllDialog() {
+    const count = this.conversations.length;
+    if (!count) return;
+    const overlay = document.createElement('div');
+    overlay.className = 'cv2-dialog-overlay';
+    overlay.innerHTML = `
+      <div class="cv2-dialog">
+        <div class="cv2-dialog-title">Delete all conversations?</div>
+        <div class="cv2-dialog-body">This will permanently delete ${count} conversation${count !== 1 ? 's' : ''}. This action cannot be undone.</div>
+        <div class="cv2-dialog-actions">
+          <button class="cv2-dialog-btn cv2-dialog-cancel">Cancel</button>
+          <button class="cv2-dialog-btn cv2-dialog-confirm">Delete all</button>
+        </div>
+      </div>`;
+    document.getElementById('chat-app').appendChild(overlay);
+    overlay.querySelector('.cv2-dialog-cancel').addEventListener('click', () => overlay.remove());
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+    overlay.querySelector('.cv2-dialog-confirm').addEventListener('click', () => {
+      overlay.remove();
+      this._clearAllConversations();
+    });
   }
 
   async _clearAllConversations() {

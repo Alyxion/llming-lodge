@@ -141,6 +141,7 @@ class ChatPage:
             show_budget=ac.show_budget,
             app_logo=ac.app_logo,
             app_title=ac.app_title,
+            app_mascot=ac.app_mascot,
             theme=theme,
         )
         config_json = payload.model_dump_json(by_alias=True)

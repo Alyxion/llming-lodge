@@ -21,6 +21,7 @@ class QuickAction(BaseModel):
     icon: str = "lightbulb"
     engagement: str = ""
     prompt: str = ""
+    text_prefix: str = Field(default="", serialization_alias="textPrefix")
 
 
 class ThemeConfig(BaseModel):
@@ -53,6 +54,7 @@ class ChatAppConfig(BaseModel):
     accent_color: str = ""
     app_logo: str = ""
     app_title: str = ""
+    app_mascot: str = ""
     show_budget: bool = False
 
 
@@ -87,4 +89,5 @@ class ChatFrontendConfig(BaseModel):
     show_budget: bool = False
     app_logo: str = ""
     app_title: str = ""
+    app_mascot: str = ""
     theme: ThemeConfig | None = None
