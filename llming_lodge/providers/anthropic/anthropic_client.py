@@ -200,8 +200,46 @@ class AnthropicClient(LlmClient):
         self._aclient = AsyncAnthropic(api_key=api_key)
         self.toolboxes = toolboxes or []
 
+    @staticmethod
+    def _mark_cache_control(msg: Dict[str, Any]) -> None:
+        """Add cache_control to the last content block of a message."""
+        content = msg["content"]
+        if isinstance(content, str):
+            msg["content"] = [
+                {
+                    "type": "text",
+                    "text": content,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ]
+        elif isinstance(content, list) and content:
+            last_block = content[-1]
+            if isinstance(last_block, dict):
+                last_block["cache_control"] = {"type": "ephemeral"}
+
+    @staticmethod
+    def _apply_cache_control(messages: List[Dict[str, Any]]) -> None:
+        """Add cache_control breakpoints for Anthropic prompt caching.
+
+        Uses up to 2 message-level breakpoints (+ system prompt = 3 of 4 allowed):
+
+        1. **First message** — catches the initial document attachment on fresh
+           conversations AND the condensed summary after history compression.
+        2. **Penultimate message** — caches the recent conversation prefix so
+           that follow-up turns only pay for the new user message.
+        """
+        if not messages:
+            return
+
+        # Breakpoint 1: first message (document / condensed summary)
+        AnthropicClient._mark_cache_control(messages[0])
+
+        # Breakpoint 2: penultimate message (recent conversation prefix)
+        if len(messages) >= 3:
+            AnthropicClient._mark_cache_control(messages[-2])
+
     def _build_kwargs(self, messages: list) -> Dict[str, Any]:
-        """Build kwargs for API call."""
+        """Build kwargs for API call with prompt caching enabled."""
         system_prompt, converted = _convert_messages(messages)
 
         kwargs = {
@@ -212,7 +250,20 @@ class AnthropicClient(LlmClient):
         }
 
         if system_prompt:
-            kwargs["system"] = system_prompt
+            # Structured format with cache_control for prompt caching.
+            # The system prompt is identical across all turns in a conversation
+            # so caching it saves re-processing on every follow-up message.
+            kwargs["system"] = [
+                {
+                    "type": "text",
+                    "text": system_prompt,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ]
+
+        # Cache the stable conversation prefix (everything before the last user turn).
+        # This is where the big savings happen for large attached documents.
+        self._apply_cache_control(converted)
 
         # Add tools if available
         if self.toolboxes:
@@ -449,17 +500,30 @@ class AnthropicClient(LlmClient):
                 # Get final message for stop reason and usage
                 final_message = await stream.get_final_message()
 
-            # Track usage from this iteration
+            # Track usage from this iteration (including cache details)
             if hasattr(final_message, 'usage'):
-                iter_input = getattr(final_message.usage, 'input_tokens', 0)
-                iter_output = getattr(final_message.usage, 'output_tokens', 0)
+                usage = final_message.usage
+                # Anthropic reports: input_tokens (non-cached),
+                # cache_creation_input_tokens (written), cache_read_input_tokens (read)
+                iter_base_input = getattr(usage, 'input_tokens', 0)
+                iter_cache_creation = getattr(usage, 'cache_creation_input_tokens', 0)
+                iter_cache_read = getattr(usage, 'cache_read_input_tokens', 0)
+                iter_output = getattr(usage, 'output_tokens', 0)
+
+                # Total input = all token types that count as input
+                iter_input = iter_base_input + iter_cache_creation + iter_cache_read
                 total_input_tokens += iter_input
                 total_output_tokens += iter_output
+
+                if iter_cache_read or iter_cache_creation:
+                    logger.info(f"[ANTHROPIC CACHE] read={iter_cache_read}, "
+                                f"creation={iter_cache_creation}, base={iter_base_input}")
 
                 # Call usage callback if provided
                 if usage_callback:
                     try:
-                        usage_callback(iter_input, iter_output)
+                        usage_callback(iter_input, iter_output,
+                                       cached_input_tokens=iter_cache_read)
                     except Exception as e:
                         logger.warning(f"Usage callback error: {e}")
 

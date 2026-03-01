@@ -10,8 +10,8 @@ may obtain a commercial license from the Licensor.
 
 | Tier         | Organization Size        | Terms                                        |
 |--------------|--------------------------|----------------------------------------------|
-| Free         | < 1,500 employees        | Covered by BSL 1.1 Additional Use Grant      |
-| Mid          | 1,500 -- 10,000 employees | Paid commercial license required             |
+| Free         | < 20 employees           | Covered by BSL 1.1 Additional Use Grant      |
+| Mid          | 20 -- 10,000 employees   | Paid commercial license required              |
 | Enterprise   | > 10,000 employees       | Custom pricing and terms                     |
 
 "Organization size" includes all affiliates under common control.

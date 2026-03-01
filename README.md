@@ -72,7 +72,7 @@ Copy `.env.example` and add the provider keys you need:
 
 **LLMing-Lodge** is licensed under the **Business Source License 1.1 (BSL 1.1)**.
 
-- **Free for small organizations** (fewer than 1,500 employees).
+- **Free for small organizations** (fewer than 20 employees).
 - **Commercial license required** for larger organizations.
 - **Converts to Apache 2.0** after 4 years per version.
 

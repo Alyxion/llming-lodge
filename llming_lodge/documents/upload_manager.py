@@ -1,8 +1,7 @@
-"""Upload manager for session-isolated file storage."""
+"""Upload manager for session-isolated in-memory file storage."""
 from __future__ import annotations
 
 import logging
-import tempfile
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -18,31 +17,46 @@ ALLOWED_MIME_TYPES = {
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",  # .xlsx
 }
 
-MAX_FILE_SIZE = 20 * 1024 * 1024  # 20 MB
+# Defaults — overridden at startup via UploadManager.configure() from ChatAppConfig
+_DEFAULT_MAX_FILE_SIZE = 20 * 1024 * 1024  # 20 MB per single file
+_DEFAULT_MAX_SESSION_SIZE = 10 * 1024 * 1024  # 10 MB total per conversation
 
 
 @dataclass
 class FileAttachment:
     name: str
-    path: Path
     size: int
     mime_type: str
     file_id: str
     consumed: bool = False
     text_content: Optional[str] = None
+    raw_data: Optional[bytes] = None
 
 
 class UploadManager:
-    """Per-session file upload manager with user isolation."""
+    """Per-session file upload manager — all data stays in memory."""
 
     _sessions: ClassVar[dict[str, "UploadManager"]] = {}
+    max_file_size: ClassVar[int] = _DEFAULT_MAX_FILE_SIZE
+    max_session_size: ClassVar[int] = _DEFAULT_MAX_SESSION_SIZE
 
     def __init__(self, session_id: str, user_id: str) -> None:
         self.session_id = session_id
         self.user_id = user_id
         self.files: list[FileAttachment] = []
-        self._base_dir = Path(tempfile.gettempdir()) / "llming_lodge_uploads" / session_id
-        self._base_dir.mkdir(parents=True, exist_ok=True)
+
+    @classmethod
+    def configure(cls, *, max_file_size: int | None = None, max_session_size: int | None = None) -> None:
+        """Set class-level upload limits (call once at startup from ChatAppConfig)."""
+        if max_file_size is not None:
+            cls.max_file_size = max_file_size
+        if max_session_size is not None:
+            cls.max_session_size = max_session_size
+        logger.info(
+            "[UPLOAD] Configured limits: max_file=%d MB, max_session=%d MB",
+            cls.max_file_size // (1024 * 1024),
+            cls.max_session_size // (1024 * 1024),
+        )
 
     @classmethod
     def get(cls, session_id: str) -> Optional["UploadManager"]:
@@ -54,26 +68,35 @@ class UploadManager:
         cls._sessions[session_id] = mgr
         return mgr
 
+    @property
+    def total_size(self) -> int:
+        """Total bytes of all files currently stored in this session."""
+        return sum(f.size for f in self.files)
+
     async def store_file(self, filename: str, content: bytes, user_id: str) -> FileAttachment:
         if user_id != self.user_id:
             raise PermissionError("User ID mismatch")
-        if len(content) > MAX_FILE_SIZE:
-            raise ValueError(f"File too large: {len(content)} bytes (max {MAX_FILE_SIZE})")
+        if len(content) > self.max_file_size:
+            raise ValueError(f"File too large: {len(content)} bytes (max {self.max_file_size})")
+        if self.total_size + len(content) > self.max_session_size:
+            used_mb = self.total_size / (1024 * 1024)
+            raise ValueError(
+                f"Conversation file limit exceeded: {used_mb:.1f} MB used, "
+                f"adding {len(content) / (1024 * 1024):.1f} MB would exceed "
+                f"{self.max_session_size / (1024 * 1024):.0f} MB limit"
+            )
 
         file_id = uuid.uuid4().hex[:12]
-        # Sanitize filename: keep only the basename, no path traversal
         safe_name = Path(filename).name
-        dest = self._base_dir / f"{file_id}_{safe_name}"
-        dest.write_bytes(content)
 
         mime_type = self._guess_mime(safe_name)
 
         attachment = FileAttachment(
             name=safe_name,
-            path=dest,
             size=len(content),
             mime_type=mime_type,
             file_id=file_id,
+            raw_data=content,
         )
         self.files.append(attachment)
         logger.info(f"[UPLOAD] Stored {safe_name} ({len(content)} bytes) as {file_id}")
@@ -84,8 +107,6 @@ class UploadManager:
             raise PermissionError("User ID mismatch")
         for f in self.files:
             if f.file_id == file_id:
-                if f.path.exists():
-                    f.path.unlink()
                 self.files.remove(f)
                 logger.info(f"[UPLOAD] Removed {f.name} ({file_id})")
                 return
@@ -95,9 +116,6 @@ class UploadManager:
         return [f for f in self.files if not f.consumed]
 
     def cleanup(self) -> None:
-        import shutil
-        if self._base_dir.exists():
-            shutil.rmtree(self._base_dir, ignore_errors=True)
         self.files.clear()
         self._sessions.pop(self.session_id, None)
         logger.info(f"[UPLOAD] Cleaned up session {self.session_id}")

@@ -368,6 +368,30 @@ class InProcessMCPServer(ABC):
         """
         pass
 
+    async def get_prompt_hints(self) -> List[str]:
+        """Optional prompt snippets appended to the system prompt.
+
+        Used to tell the LLM about custom fenced code block languages
+        the frontend can render (e.g. ```contact, ```status).
+        Override in subclasses to return hint strings.
+        """
+        return []
+
+    async def get_client_renderers(self) -> List[Dict[str, str]]:
+        """Optional client-side renderers for custom fenced code block languages.
+
+        Returns a list of dicts, each with:
+          - lang: fenced code block language ID (e.g. 'contact')
+          - js: JavaScript code that registers a DocPluginRegistry plugin.
+                The code receives ``registry`` in scope and must call
+                ``registry.register(lang, { render, inline })``
+          - css (optional): CSS rules to inject
+
+        These integrate with the existing DocPluginRegistry / marked.js pipeline,
+        so the LLM just uses standard markdown ```lang blocks.
+        """
+        return []
+
 
 class MCPInProcessConnection(MCPConnection):
     """MCP connection adapter wrapping an InProcessMCPServer.

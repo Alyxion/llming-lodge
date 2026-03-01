@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "A cozy lodge where LLMings stream, use tools, and stay within budget"
 authors = ["Michael Ikemann"]
 license = "BUSL-1.1"
-readme = "README.pypi.md"
+readme = "README.md"
 repository = "https://github.com/Alyxion/llming-lodge"
 homepage = "https://github.com/Alyxion/llming-lodge"
 keywords = ["llm", "chat", "mcp", "streaming", "openai", "anthropic", "gemini"]
@@ -20,7 +20,7 @@ packages = [{include = "llming_lodge"}]
 "Author" = "https://github.com/Alyxion"
 
 [tool.poetry.dependencies]
-python = "^3.14"
+python = ">=3.12"
 
 # Core
 pydantic = "*"
@@ -41,12 +41,12 @@ uvicorn = "*"
 
 # Document processing
 pdfplumber = ">=0.11"
+pypdfium2 = ">=4.0"
 python-docx = ">=1.2"
 openpyxl = ">=3.1"
 
 # Budget persistence (optional)
-pymongo = ">=4.15"
-motor = ">=3.7"
+pymongo = ">=4.16"
 
 [tool.poetry.scripts]
 llming-lodge = "llming_lodge.standalone:main"

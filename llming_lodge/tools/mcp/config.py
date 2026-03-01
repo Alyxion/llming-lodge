@@ -27,6 +27,9 @@ class MCPServerConfig(BaseModel):
     enabled_by_default: bool = Field(False, description="If True, tools are enabled on discovery; otherwise opt-in")
     default_enabled_tools: Optional[List[str]] = Field(None, description="When set, only these tools are enabled by default (per-tool control). Requires enabled_by_default=True.")
     exclude_providers: Optional[List[str]] = Field(None, description="Providers this MCP does NOT support. None = all providers.")
+    requires_providers: Optional[List[str]] = Field(None, description="If set, MCP tools only work with these providers (respects PROVIDER_COMPAT). None = all providers.")
+    collapse_tools: bool = Field(False, description="If True, all tools are shown as a single toggle in the UI instead of individual entries.")
+    flyout: bool = Field(False, description="If True, tools get their own top-level flyout in the plus menu")
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 

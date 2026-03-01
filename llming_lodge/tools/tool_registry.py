@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from .tool_definition import (
+    PROVIDER_COMPAT,
     ToolDefinition,
     ToolSource,
     ToolUIMetadata,
@@ -73,8 +74,6 @@ class ToolRegistry:
         Args:
             tool: The tool definition to register
         """
-        if tool.name in self._tools:
-            logger.warning(f"Tool '{tool.name}' already registered, overwriting")
         self._tools[tool.name] = tool
         logger.debug(f"Registered tool: {tool.name} (source={tool.source.value})")
 
@@ -87,6 +86,7 @@ class ToolRegistry:
         ui: Optional[ToolUIMetadata] = None,
         fixed_cost_usd: Optional[float] = None,
         requires_provider: Optional[str] = None,
+        realtime_enabled: bool = False,
     ) -> ToolDefinition:
         """Register a built-in Python tool.
 
@@ -98,6 +98,7 @@ class ToolRegistry:
             ui: UI display metadata
             fixed_cost_usd: Fixed cost per invocation
             requires_provider: If set, only works with this provider
+            realtime_enabled: If True, tool is available in live voice (Realtime API) sessions
 
         Returns:
             The registered ToolDefinition
@@ -111,6 +112,7 @@ class ToolRegistry:
             ui=ui,
             fixed_cost_usd=fixed_cost_usd,
             requires_provider=requires_provider,
+            realtime_enabled=realtime_enabled,
         )
         self.register(tool)
         return tool
@@ -306,6 +308,12 @@ class ToolRegistry:
             tool = self._tools.get(provider_key)
             if tool:
                 return tool
+            # Try compatible provider (e.g. azure_openai → openai)
+            compat = PROVIDER_COMPAT.get(provider)
+            if compat:
+                tool = self._tools.get(f"{name}:{compat}")
+                if tool:
+                    return tool
 
         # Fall back to generic name
         return self._tools.get(name)
@@ -351,8 +359,7 @@ class ToolRegistry:
         """
         return [
             t for t in self._tools.values()
-            if (t.requires_provider is None or t.requires_provider == provider)
-            and not (t.exclude_providers and provider in t.exclude_providers)
+            if t.is_available_for_provider(provider)
         ]
 
     def get_names(self) -> List[str]:
@@ -429,6 +436,13 @@ class ToolRegistry:
             connection = self._mcp_connections.get(name)
             if not connection:
                 raise ValueError(f"MCP connection not established for tool '{name}'")
+            return await connection.call_tool(name, arguments)
+
+        elif tool.source == ToolSource.MCP_BROWSER:
+            # Browser-hosted MCP tools — proxied via WebSocket to a Web Worker
+            connection = self._mcp_connections.get(name)
+            if not connection:
+                raise ValueError(f"Browser MCP connection not established for tool '{name}'")
             return await connection.call_tool(name, arguments)
 
         else:

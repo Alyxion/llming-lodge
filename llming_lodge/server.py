@@ -29,36 +29,21 @@ class SessionDataStore:
     """
 
     _lock = threading.Lock()
-    _assets: dict[str, dict[str, tuple[bytes, str]]] = {}
+    _assets: dict[str, tuple[bytes, str]] = {}
     _pasted_images: dict[str, list[str]] = {}
     _pending_loads: dict[str, dict] = {}
 
     # ── Assets ────────────────────────────────────────────────
 
     @classmethod
-    def register_asset_bucket(cls, scope_key: str) -> None:
+    def put_asset(cls, path: str, data: bytes, content_type: str) -> None:
         with cls._lock:
-            cls._assets[scope_key] = {}
+            cls._assets[path] = (data, content_type)
 
     @classmethod
-    def remove_asset_bucket(cls, scope_key: str) -> None:
+    def get_asset(cls, path: str) -> Optional[tuple[bytes, str]]:
         with cls._lock:
-            cls._assets.pop(scope_key, None)
-
-    @classmethod
-    def put_asset(cls, scope_key: str, path: str, data: bytes, content_type: str) -> None:
-        with cls._lock:
-            bucket = cls._assets.get(scope_key)
-            if bucket is not None:
-                bucket[path] = (data, content_type)
-
-    @classmethod
-    def get_asset(cls, scope_key: str, path: str) -> Optional[tuple[bytes, str]]:
-        with cls._lock:
-            bucket = cls._assets.get(scope_key)
-            if bucket is None:
-                return None
-            return bucket.get(path)
+            return cls._assets.get(path)
 
     # ── Pasted images ─────────────────────────────────────────
 
@@ -129,6 +114,79 @@ def get_chat_static_path() -> str:
     return os.path.join(get_static_path(), 'chat')
 
 
+def _xlsx_preview(data: bytes) -> dict:
+    """Convert XLSX bytes to structured table preview data."""
+    import io
+    from openpyxl import load_workbook
+    wb = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+    sheets = []
+    for ws in wb.worksheets[:5]:
+        cols, rows = [], []
+        for i, row in enumerate(ws.iter_rows(values_only=True)):
+            if i == 0:
+                cols = [str(c) if c is not None else f'Col {j+1}' for j, c in enumerate(row)]
+            else:
+                rows.append([str(c) if c is not None else '' for c in row])
+            if i >= 100:
+                break
+        if not cols:
+            continue
+        sheets.append({
+            "name": ws.title, "columns": cols, "rows": rows,
+            "total_rows": ws.max_row or 0,
+        })
+    wb.close()
+    return {"type": "table", "sheets": sheets}
+
+
+def _docx_preview(data: bytes) -> dict:
+    """Convert DOCX bytes to HTML preview."""
+    import io
+    from docx import Document
+    from html import escape
+    doc = Document(io.BytesIO(data))
+    parts = []
+    for para in doc.paragraphs[:300]:
+        text = para.text
+        if not text.strip():
+            parts.append('<br>')
+            continue
+        sn = para.style.name if para.style else ''
+        if 'Heading 1' in sn:
+            parts.append(f'<h1>{escape(text)}</h1>')
+        elif 'Heading 2' in sn:
+            parts.append(f'<h2>{escape(text)}</h2>')
+        elif 'Heading 3' in sn:
+            parts.append(f'<h3>{escape(text)}</h3>')
+        else:
+            runs_html = ''
+            for run in para.runs:
+                t = escape(run.text)
+                if run.bold:
+                    t = f'<b>{t}</b>'
+                if run.italic:
+                    t = f'<i>{t}</i>'
+                if run.underline:
+                    t = f'<u>{t}</u>'
+                runs_html += t
+            parts.append(f'<p>{runs_html or escape(text)}</p>')
+    for table in doc.tables[:10]:
+        parts.append('<table><thead>')
+        for i, row in enumerate(table.rows[:50]):
+            if i == 0:
+                parts.append('<tr>')
+                for cell in row.cells:
+                    parts.append(f'<th>{escape(cell.text)}</th>')
+                parts.append('</tr></thead><tbody>')
+            else:
+                parts.append('<tr>')
+                for cell in row.cells:
+                    parts.append(f'<td>{escape(cell.text)}</td>')
+                parts.append('</tr>')
+        parts.append('</tbody></table>')
+    return {"type": "html", "html": '\n'.join(parts)}
+
+
 def build_http_router():
     """Build the FastAPI APIRouter with file upload, image paste, and asset endpoints.
 
@@ -139,7 +197,7 @@ def build_http_router():
     from fastapi.responses import Response
     from pydantic import BaseModel
 
-    from llming_lodge.documents import UploadManager, MAX_FILE_SIZE
+    from llming_lodge.documents import UploadManager
     from llming_lodge.api.chat_session_api import SessionRegistry, _handle_client_message
 
     router = APIRouter(prefix=API_PREFIX)
@@ -158,9 +216,12 @@ def build_http_router():
         results = []
         for f in files:
             content = await f.read()
-            if len(content) > MAX_FILE_SIZE:
+            if len(content) > UploadManager.max_file_size:
                 raise HTTPException(413, f"File too large: {f.filename}")
-            att = await mgr.store_file(f.filename, content, x_user_id)
+            try:
+                att = await mgr.store_file(f.filename, content, x_user_id)
+            except ValueError as e:
+                raise HTTPException(413, str(e))
             results.append({
                 "name": att.name,
                 "size": att.size,
@@ -168,6 +229,84 @@ def build_http_router():
                 "mimeType": att.mime_type,
             })
         return {"files": results}
+
+    # ---- File preview (serves uploaded files for hover preview) ----
+
+    @router.get("/file-preview/{session_id}/{file_id}")
+    async def file_preview(session_id: str, file_id: str):
+        """Serve an uploaded file by its file_id for hover preview."""
+        from starlette.responses import Response
+
+        mgr = UploadManager.get(session_id)
+        if not mgr:
+            raise HTTPException(404, "Session not found")
+        for f in mgr.files:
+            if f.file_id == file_id:
+                if not f.raw_data:
+                    raise HTTPException(404, "File data not available")
+                return Response(content=f.raw_data, media_type=f.mime_type)
+        raise HTTPException(404, "File not found")
+
+    # ---- File content preview (structured for popover) ----
+
+    @router.get("/file-content/{session_id}/{file_id}")
+    async def file_content_preview(session_id: str, file_id: str):
+        """Return structured preview data for a file (table, html, text, or URL)."""
+        import asyncio as _aio
+
+        mgr = UploadManager.get(session_id)
+        if not mgr:
+            raise HTTPException(404, "Session not found")
+        file_att = None
+        for f in mgr.files:
+            if f.file_id == file_id:
+                file_att = f
+                break
+        if not file_att or not file_att.raw_data:
+            raise HTTPException(404, "File not found")
+
+        ct = file_att.mime_type or ''
+        preview_url = f"{API_PREFIX}/file-preview/{session_id}/{file_id}"
+
+        # Images → URL
+        if ct.startswith('image/'):
+            return {"type": "image", "url": preview_url, "name": file_att.name}
+
+        # PDF → URL (browser renders natively)
+        if ct == 'application/pdf':
+            return {"type": "pdf", "url": preview_url, "name": file_att.name}
+
+        # XLSX → structured table
+        if 'spreadsheet' in ct or 'xlsx' in ct:
+            try:
+                result = await _aio.to_thread(_xlsx_preview, file_att.raw_data)
+                result["name"] = file_att.name
+                return result
+            except Exception as e:
+                logger.warning(f"[FILE-CONTENT] XLSX preview failed: {e}")
+
+        # DOCX → HTML
+        if 'wordprocessing' in ct or 'docx' in ct:
+            try:
+                result = await _aio.to_thread(_docx_preview, file_att.raw_data)
+                result["name"] = file_att.name
+                return result
+            except Exception as e:
+                logger.warning(f"[FILE-CONTENT] DOCX preview failed: {e}")
+
+        # Text / CSV / JSON
+        if ct.startswith('text/') or ct == 'application/json' or ct == 'application/csv':
+            try:
+                content = file_att.raw_data.decode(errors='replace')[:50000]
+                return {"type": "text", "content": content, "name": file_att.name}
+            except Exception:
+                pass
+
+        # Fallback
+        return {
+            "type": "download", "url": preview_url,
+            "name": file_att.name, "size": file_att.size, "content_type": ct,
+        }
 
     # ---- Image paste ----
 
@@ -192,10 +331,10 @@ def build_http_router():
 
     # ---- Session-scoped assets (photos, etc.) ----
 
-    @router.get("/asset/{scope_key}/{path:path}")
-    async def serve_asset(scope_key: str, path: str):
-        """Serve a session-scoped binary asset (e.g. contact photo)."""
-        entry = SessionDataStore.get_asset(scope_key, path)
+    @router.get("/asset/{path:path}")
+    async def serve_asset(path: str):
+        """Serve a binary asset (e.g. contact photo)."""
+        entry = SessionDataStore.get_asset(path)
         if entry is None:
             return Response(status_code=404, content="Not found")
         data, content_type = entry
@@ -203,6 +342,72 @@ def build_http_router():
             content=data,
             media_type=content_type,
             headers={"Cache-Control": "private, max-age=3600"},
+        )
+
+    # ---- PPTX template export ----
+
+    @router.post("/pptx/export/{session_id}")
+    async def export_pptx_templated(session_id: str, request: Request):
+        """Generate PPTX using a real template file. Returns binary PPTX."""
+        import asyncio as _aio
+
+        data = await request.json()
+        spec = data.get("spec", {})
+        chart_images = data.get("chartImages", {})
+        template_name = spec.get("template", "")
+
+        # Look up template: try active session first, then global registry
+        registry = SessionRegistry.get()
+        template = None
+        entry = registry.get_session(session_id)
+        if entry:
+            doc_manager = getattr(entry, "doc_manager", None)
+            if doc_manager and template_name:
+                for tpl in getattr(doc_manager, "presentation_templates", []):
+                    if getattr(tpl, "name", "") == template_name:
+                        template = tpl
+                        break
+
+        # Fall back to global template registry (works for restored chats)
+        if not template and template_name:
+            template = registry.get_template(template_name)
+
+        if not template or not getattr(template, "template_path", ""):
+            raise HTTPException(400, f"Template '{template_name}' not found or has no template_path")
+
+        from llming_lodge.doc_plugins.pptx_exporter import export_pptx as _export_pptx
+
+        template_config = template.model_dump(by_alias=True)
+        pptx_bytes = await _aio.to_thread(
+            _export_pptx, spec, template.template_path, chart_images, template_config,
+        )
+
+        filename = (spec.get("title") or "presentation").replace("/", "_").strip() or "presentation"
+        return Response(
+            content=pptx_bytes,
+            media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            headers={"Content-Disposition": f'attachment; filename="{filename}.pptx"'},
+        )
+
+    # ---- Word/DOCX export ----
+
+    @router.post("/word/export")
+    async def export_word_docx(request: Request):
+        """Generate DOCX from a Word document spec. Returns binary DOCX."""
+        import asyncio as _aio
+
+        data = await request.json()
+        spec = data.get("spec", {})
+
+        from llming_lodge.doc_plugins.word_exporter import export_docx as _export_docx
+
+        docx_bytes = await _aio.to_thread(_export_docx, spec)
+
+        filename = (spec.get("title") or "document").replace("/", "_").strip() or "document"
+        return Response(
+            content=docx_bytes,
+            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            headers={"Content-Disposition": f'attachment; filename="{filename}.docx"'},
         )
 
     # ---- WebSocket echo (debug) ----
@@ -254,7 +459,7 @@ def build_http_router():
         controller._wire_condensation()
 
         # Send session init
-        init_msg = controller.build_session_init(user_name=entry.user_name)
+        init_msg = await controller.build_session_init(user_name=entry.user_name)
         await ws.send_json(init_msg)
 
         # Send initial context info
@@ -293,7 +498,7 @@ def get_ws_router():
     return build_http_router()
 
 
-def setup_routes(app, *, debug: bool = False) -> None:
+def setup_routes(app, *, debug: bool = False, nudge_store=None) -> None:
     """Mount all llming-lodge routes (static files + API) on a Starlette/FastAPI app.
 
     Framework-agnostic — works with any app that supports ``.mount()``
@@ -303,11 +508,12 @@ def setup_routes(app, *, debug: bool = False) -> None:
 
     app.mount(STATIC_PREFIX, StaticFiles(directory=get_static_path()), name="llming-static")
     app.mount("/chat-static", StaticFiles(directory=get_chat_static_path()), name="chat-static")
+
     app.include_router(build_http_router())
 
     if debug:
         try:
             from llming_lodge.api.debug_api import build_debug_router
-            app.include_router(build_debug_router())
+            app.include_router(build_debug_router(nudge_store=nudge_store))
         except Exception as e:
             logger.warning(f"[CHAT] Failed to load debug API: {e}")

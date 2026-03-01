@@ -1,0 +1,147 @@
+/* chat-welcome.css — Initial/welcome view, nudge welcome */
+
+/* ── Initial / Welcome View ───────────────────────── */
+
+.cv2-initial-view {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+
+/* In initial mode, the input sits right below the welcome content */
+.cv2-chat-wrapper.cv2-initial-mode {
+  justify-content: center;
+}
+
+.cv2-chat-wrapper.cv2-initial-mode .cv2-initial-view {
+  flex: 0 0 auto;
+  padding-bottom: 0;
+}
+
+.cv2-chat-wrapper.cv2-initial-mode .cv2-input-area {
+  padding-top: 36px;
+  transition: none;
+}
+
+/* Slide-down animation when transitioning from initial to chat mode */
+.cv2-input-area.cv2-input-animating {
+  animation: cv2-input-slide-down 0.4s ease-out forwards;
+}
+
+@keyframes cv2-input-slide-down {
+  from { transform: translateY(-40px); opacity: 0.5; }
+  to   { transform: translateY(0); opacity: 1; }
+}
+
+.cv2-initial-view-logo {
+  height: 40px;
+  width: auto;
+  margin-bottom: 8px;
+  animation: cv2-greeting-in 0.5s ease-out both;
+}
+
+.cv2-greeting-row {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  animation: cv2-greeting-in 0.6s ease-out both;
+}
+
+.cv2-mascot {
+  height: 110px;
+  width: auto;
+  flex-shrink: 0;
+}
+
+.cv2-initial-view h2 {
+  font-size: 28px;
+  font-weight: 700;
+  margin: 0;
+  color: var(--chat-text);
+}
+
+/* ── Nudge welcome (initial view override) ───────── */
+
+.cv2-nudge-welcome {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  animation: cv2-greeting-in 0.6s ease-out both;
+}
+
+.cv2-nudge-welcome-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.cv2-nudge-welcome-icon {
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  object-fit: cover;
+  flex-shrink: 0;
+}
+
+.cv2-nudge-welcome-icon-default {
+  font-size: 48px !important;
+  color: var(--chat-text-muted);
+  flex-shrink: 0;
+}
+
+.cv2-nudge-welcome-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.cv2-nudge-welcome h2 {
+  font-size: 24px;
+  margin: 0;
+  text-align: left;
+}
+
+.cv2-nudge-welcome-creator {
+  font-size: 13px;
+  color: var(--chat-text-muted);
+  margin: 0;
+}
+
+.cv2-nudge-welcome-desc {
+  font-size: 14px;
+  color: var(--chat-text-muted);
+  max-width: 400px;
+  text-align: left;
+  margin: 0;
+  line-height: 1.4;
+}
+
+.cv2-nudge-suggestions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: center;
+  max-width: 600px;
+  margin-top: 12px;
+}
+.cv2-nudge-suggestion {
+  background: var(--chat-surface);
+  border: 1px solid var(--chat-border);
+  border-radius: 12px;
+  padding: 10px 16px;
+  font-size: 14px;
+  font-family: inherit;
+  color: var(--chat-text);
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+  text-align: left;
+  max-width: 280px;
+}
+.cv2-nudge-suggestion:hover {
+  background: var(--chat-accent-light);
+  border-color: var(--chat-accent);
+}

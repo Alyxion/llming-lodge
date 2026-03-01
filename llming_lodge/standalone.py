@@ -126,7 +126,15 @@ def create_app():
     <title>Chat</title>
     <script>window.__CHAT_CONFIG__ = {config_json};</script>
     <link rel="stylesheet" href="/chat-static/vendor/material-icons.css">
-    <link rel="stylesheet" href="/chat-static/chat-app.css">
+    <link rel="stylesheet" href="/chat-static/chat-core.css">
+    <link rel="stylesheet" href="/chat-static/chat-sidebar.css">
+    <link rel="stylesheet" href="/chat-static/chat-messages.css">
+    <link rel="stylesheet" href="/chat-static/chat-input.css">
+    <link rel="stylesheet" href="/chat-static/chat-welcome.css">
+    <link rel="stylesheet" href="/chat-static/chat-voice.css">
+    <link rel="stylesheet" href="/chat-static/chat-presets.css">
+    <link rel="stylesheet" href="/chat-static/chat-nudges.css">
+    <link rel="stylesheet" href="/chat-static/chat-documents.css">
     <link rel="stylesheet" href="/chat-static/vendor/katex.min.css">
     <script src="/chat-static/vendor/marked.min.js"></script>
     <script src="/chat-static/vendor/purify.min.js"></script>
@@ -137,7 +145,20 @@ def create_app():
 </head>
 <body>
     <div id="chat-app" style="position:fixed;inset:0;z-index:9999;"></div>
-    <script src="/chat-static/chat-app.js" defer></script>
+    <script src="/chat-static/chat-features.js"></script>
+    <script src="/chat-static/chat-idb.js"></script>
+    <script src="/chat-static/chat-ws.js"></script>
+    <script src="/chat-static/chat-markdown.js"></script>
+    <script src="/chat-static/chat-sidebar.js" defer></script>
+    <script src="/chat-static/chat-messages.js" defer></script>
+    <script src="/chat-static/chat-images.js" defer></script>
+    <script src="/chat-static/chat-plus-menu.js" defer></script>
+    <script src="/chat-static/chat-voice.js" defer></script>
+    <script src="/chat-static/chat-realtime.js" defer></script>
+    <script src="/chat-static/chat-documents.js" defer></script>
+    <script src="/chat-static/chat-nudges.js" defer></script>
+    <script src="/chat-static/chat-presets.js" defer></script>
+    <script src="/chat-static/chat-app-core.js" defer></script>
 </body>
 </html>"""
 

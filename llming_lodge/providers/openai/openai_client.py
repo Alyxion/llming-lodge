@@ -182,10 +182,12 @@ class OpenAILlmClient(LlmClient):
             self._client = AzureOpenAI(
                 api_key=api_key,
                 api_version=api_version,
+                azure_endpoint=base_url,
             )
             self._aclient = AsyncAzureOpenAI(
                 api_key=api_key,
                 api_version=api_version,
+                azure_endpoint=base_url,
             )
         else:
             base_url = base_url or os.environ.get("OPENAI_API_BASE")
@@ -233,6 +235,60 @@ class OpenAILlmClient(LlmClient):
 
         return {"reasoning": {"effort": effort_value}}
 
+    @staticmethod
+    def _enforce_strict_schema(schema: dict) -> dict:
+        """Recursively enforce OpenAI strict-mode rules on a JSON schema.
+
+        Handles all strict-mode requirements:
+        - Every schema node must have a ``type`` key
+        - Every object must have ``additionalProperties: false``
+        - Every object must have ``properties`` and ``required`` listing all keys
+        - Every array must have ``items``
+        - ``default`` values are moved into the description
+        - ``enum`` values are removed from non-string types if needed
+        """
+        _recurse = OpenAILlmClient._enforce_strict_schema
+        schema = dict(schema)
+        typ = schema.get("type")
+
+        # Ensure every node has a type (required by strict mode)
+        if not typ and "anyOf" not in schema and "oneOf" not in schema and "allOf" not in schema:
+            schema["type"] = "string"
+            typ = "string"
+
+        if typ == "object":
+            schema["additionalProperties"] = False
+            if "properties" not in schema:
+                schema["properties"] = {}
+            schema["required"] = list(schema["properties"].keys())
+            schema["properties"] = {
+                k: _recurse(dict(v)) for k, v in schema["properties"].items()
+            }
+
+        elif typ == "array":
+            if "items" not in schema:
+                schema["items"] = {"type": "string"}
+            schema["items"] = _recurse(dict(schema["items"]))
+
+        # anyOf / oneOf / allOf
+        for combo_key in ("anyOf", "oneOf", "allOf"):
+            if combo_key in schema:
+                schema[combo_key] = [_recurse(dict(s)) for s in schema[combo_key]]
+
+        # Move default to description
+        if "default" in schema:
+            default_val = schema.pop("default")
+            if isinstance(default_val, bool):
+                default_str = str(default_val).lower()
+            elif isinstance(default_val, str):
+                default_str = f'"{default_val}"' if default_val else "empty"
+            else:
+                default_str = str(default_val)
+            desc = schema.get("description", "")
+            schema["description"] = f"{desc} (default: {default_str})"
+
+        return schema
+
     def _build_tools_list(self) -> List[Dict[str, Any]]:
         """Build tools list from toolboxes for API calls.
 
@@ -252,32 +308,12 @@ class OpenAILlmClient(LlmClient):
             for tool in toolbox.tools:
                 if isinstance(tool, str) and tool == "web_search":
                     tools_list.append({"type": "web_search"})
+                elif isinstance(tool, dict):
+                    # Provider-native tool as dict (e.g. {"type": "web_search", ...})
+                    tools_list.append(tool)
                 elif isinstance(tool, LlmTool):
-                    # For OpenAI strict mode:
-                    # 1. All properties must be in required
-                    # 2. Remove 'default' field and append to description
-                    params = dict(tool.parameters)
-                    if "properties" in params:
-                        params["required"] = list(params["properties"].keys())
-                        # Process each property to move default to description
-                        new_props = {}
-                        for prop_name, prop_def in params["properties"].items():
-                            prop_def = dict(prop_def)  # Copy to avoid mutating original
-                            if "default" in prop_def:
-                                default_val = prop_def.pop("default")
-                                # Format default value for description
-                                if isinstance(default_val, bool):
-                                    default_str = str(default_val).lower()
-                                elif isinstance(default_val, str):
-                                    default_str = f'"{default_val}"' if default_val else "empty"
-                                else:
-                                    default_str = str(default_val)
-                                # Append to description
-                                desc = prop_def.get("description", "")
-                                prop_def["description"] = f"{desc} (default: {default_str})"
-                            new_props[prop_name] = prop_def
-                        params["properties"] = new_props
-                    params["additionalProperties"] = False
+                    # Recursively enforce OpenAI strict-mode rules on the schema
+                    params = self._enforce_strict_schema(dict(tool.parameters))
 
                     tool_schema = {
                         "type": "function",
@@ -289,7 +325,7 @@ class OpenAILlmClient(LlmClient):
                     tools_list.append(tool_schema)
 
         tool_names = [t.get('name') or t.get('type') for t in tools_list]
-        logger.debug(f"[OPENAI] Built tools list: {tool_names}")
+        logger.debug(f"[OPENAI] Built tools list ({len(tool_names)}): {tool_names}")
         return tools_list
 
     def _has_web_search(self) -> bool:
@@ -301,6 +337,8 @@ class OpenAILlmClient(LlmClient):
                 for tool in toolbox.tools:
                     if isinstance(tool, str) and tool == "web_search":
                         return True
+                    if isinstance(tool, dict) and tool.get("type") == "web_search":
+                        return True
         return False
 
     def _is_reasoning_model(self) -> bool:
@@ -308,7 +346,7 @@ class OpenAILlmClient(LlmClient):
 
         GPT-5 models don't support the temperature parameter.
         """
-        return self.model.startswith("gpt-5") or self.model.startswith("o1") or self.model.startswith("o3")
+        return self.model.startswith("gpt-5") or self.model.startswith("o1") or self.model.startswith("o3") or self.model.startswith("o4")
 
     def _skip_temperature(self) -> bool:
         """Check if temperature parameter should be skipped.
@@ -441,7 +479,16 @@ class OpenAILlmClient(LlmClient):
         if tools_list:
             create_kwargs["tools"] = tools_list
 
-        response = await self._aclient.responses.create(**create_kwargs)
+        try:
+            response = await self._aclient.responses.create(**create_kwargs)
+        except Exception as api_err:
+            if "invalid_function_parameters" in str(api_err).lower() or "invalid schema" in str(api_err).lower():
+                # Log the offending tool schemas for debugging
+                import json as _json
+                for t in tools_list:
+                    if t.get("name") and t.get("parameters"):
+                        logger.debug(f"[OPENAI] Tool schema '{t['name']}': {_json.dumps(t['parameters'], indent=2)[:500]}")
+            raise
 
         # Handle function call output or text
         # GPT-5 may return multiple output items (reasoning + message)
@@ -757,12 +804,18 @@ class OpenAILlmClient(LlmClient):
                             ),
                         )
                     elif isinstance(event, ResponseCompletedEvent):
-                        # Capture usage from completed response
+                        # Capture usage from completed response (including cache details)
                         if hasattr(event, 'response') and hasattr(event.response, 'usage'):
                             usage = event.response.usage
+                            # OpenAI reports cached tokens in input_tokens_details
+                            cached = 0
+                            details = getattr(usage, 'input_tokens_details', None)
+                            if details:
+                                cached = getattr(details, 'cached_tokens', 0) or 0
                             iteration_usage = {
                                 'input_tokens': getattr(usage, 'input_tokens', 0),
                                 'output_tokens': getattr(usage, 'output_tokens', 0),
+                                'cached_input_tokens': cached,
                             }
                     # Reasoning model events (gpt-5, o1, etc.) - consume but don't yield
                     elif isinstance(event, (ResponseReasoningTextDeltaEvent, ResponseReasoningTextDoneEvent,
@@ -774,9 +827,14 @@ class OpenAILlmClient(LlmClient):
                         # Capture usage even from incomplete responses
                         if hasattr(event, 'response') and hasattr(event.response, 'usage'):
                             usage = event.response.usage
+                            cached = 0
+                            details = getattr(usage, 'input_tokens_details', None)
+                            if details:
+                                cached = getattr(details, 'cached_tokens', 0) or 0
                             iteration_usage = {
                                 'input_tokens': getattr(usage, 'input_tokens', 0),
                                 'output_tokens': getattr(usage, 'output_tokens', 0),
+                                'cached_input_tokens': cached,
                             }
                         reason = getattr(event, 'reason', 'unknown')
                         logger.warning(f"Response incomplete: {reason}")
@@ -786,9 +844,14 @@ class OpenAILlmClient(LlmClient):
                     try:
                         final_response = await stream.get_final_response()
                         if hasattr(final_response, 'usage') and final_response.usage:
+                            cached = 0
+                            details = getattr(final_response.usage, 'input_tokens_details', None)
+                            if details:
+                                cached = getattr(details, 'cached_tokens', 0) or 0
                             iteration_usage = {
                                 'input_tokens': getattr(final_response.usage, 'input_tokens', 0),
                                 'output_tokens': getattr(final_response.usage, 'output_tokens', 0),
+                                'cached_input_tokens': cached,
                             }
                     except Exception:
                         pass  # Stream may not support get_final_response
@@ -797,11 +860,17 @@ class OpenAILlmClient(LlmClient):
             if iteration_usage:
                 total_input_tokens += iteration_usage['input_tokens']
                 total_output_tokens += iteration_usage['output_tokens']
+                iter_cached = iteration_usage.get('cached_input_tokens', 0)
+
+                if iter_cached:
+                    logger.info(f"[OPENAI CACHE] cached={iter_cached} of {iteration_usage['input_tokens']} input tokens")
 
                 # Call usage callback if provided
                 if usage_callback:
                     try:
-                        usage_callback(iteration_usage['input_tokens'], iteration_usage['output_tokens'])
+                        usage_callback(iteration_usage['input_tokens'],
+                                       iteration_usage['output_tokens'],
+                                       cached_input_tokens=iter_cached)
                     except Exception as e:
                         logger.warning(f"Usage callback error: {e}")
 
@@ -870,62 +939,56 @@ class OpenAILlmClient(LlmClient):
         self,
         prompt: str,
         size: str = "1024x1024",
-        quality: str = "standard",
+        quality: str = "medium",
         n: int = 1,
-        model: str = "dall-e-3"
+        model: str = "gpt-image-1"
     ) -> str:
         """
-        Generate an image using DALL-E.
+        Generate an image.
 
         Args:
             prompt: Text description of the image to generate
-            size: Image size - "1024x1024", "1792x1024", or "1024x1792" for DALL-E 3
-            quality: "standard" or "hd" (DALL-E 3 only)
-            n: Number of images to generate (1 for DALL-E 3)
-            model: Model to use ("dall-e-3" or "dall-e-2")
+            size: Image size (e.g. "1024x1024", "1536x1024", "1024x1536")
+            quality: "low", "medium", or "high" for gpt-image-1; "standard" or "hd" for dall-e-3
+            n: Number of images to generate
+            model: Model/deployment name
 
         Returns:
             Base64-encoded image data
         """
-        response = await self._aclient.images.generate(
-            model=model,
-            prompt=prompt,
-            size=size,
-            quality=quality,
-            n=n,
-            response_format="b64_json"
-        )
+        kwargs = dict(model=model, prompt=prompt, size=size, quality=quality, n=n)
+        # DALL-E models need explicit response_format; gpt-image-1 always returns base64
+        if model.startswith("dall-e"):
+            kwargs["response_format"] = "b64_json"
+        response = await self._aclient.images.generate(**kwargs)
         return response.data[0].b64_json
 
     def generate_image_sync(
         self,
         prompt: str,
         size: str = "1024x1024",
-        quality: str = "standard",
+        quality: str = "medium",
         n: int = 1,
-        model: str = "dall-e-3"
+        model: str = "gpt-image-1"
     ) -> str:
         """
-        Generate an image using DALL-E (synchronous version).
+        Generate an image (synchronous version).
 
         Args:
             prompt: Text description of the image to generate
-            size: Image size - "1024x1024", "1792x1024", or "1024x1792" for DALL-E 3
-            quality: "standard" or "hd" (DALL-E 3 only)
-            n: Number of images to generate (1 for DALL-E 3)
-            model: Model to use ("dall-e-3" or "dall-e-2")
+            size: Image size (e.g. "1024x1024", "1536x1024", "1024x1536")
+            quality: "low", "medium", or "high" for gpt-image-1; "standard" or "hd" for dall-e-3
+            n: Number of images to generate
+            model: Model/deployment name
 
         Returns:
             Base64-encoded image data
         """
-        response = self._client.images.generate(
-            model=model,
-            prompt=prompt,
-            size=size,
-            quality=quality,
-            n=n,
-            response_format="b64_json"
-        )
+        kwargs = dict(model=model, prompt=prompt, size=size, quality=quality, n=n)
+        # DALL-E models need explicit response_format; gpt-image-1 always returns base64
+        if model.startswith("dall-e"):
+            kwargs["response_format"] = "b64_json"
+        response = self._client.images.generate(**kwargs)
         return response.data[0].b64_json
 
 

@@ -17,7 +17,7 @@ from llming_lodge.budget.budget_limit import BudgetLimit
 from llming_lodge.budget.budget_manager import LLMBudgetManager
 from llming_lodge.llm_base_models import Role, ChatMessage
 from llming_lodge.tools.tool_call import ToolCallInfo, ToolCallStatus
-from llming_lodge.tools.tool_definition import MCPServerConfig, ToolDefinition
+from llming_lodge.tools.tool_definition import MCPServerConfig, PROVIDER_COMPAT, ToolDefinition, ToolSource
 from llming_lodge.tools.tool_registry import get_default_registry
 
 logger = logging.getLogger(__name__)
@@ -145,10 +145,9 @@ class ChatController(ABC):
         """Set session history."""
         self.session.history = value
 
-    @property
-    def available_budget(self) -> float:
-        """Get available budget amount."""
-        return self.budget_manager.available_budget
+    async def available_budget_async(self) -> float:
+        """Get available budget amount (async — use from event loop)."""
+        return await self.budget_manager.available_budget_async()
 
     # ========== BUSINESS LOGIC (concrete methods) ==========
 
@@ -304,10 +303,15 @@ class ChatController(ABC):
 
         # Create new history without system message
         old_history = self.session.get_history()
+        old_condensed = getattr(self.session, '_condensed_summary', None)
         new_history = ChatHistory()
         for msg in old_history.messages:
             if msg.role != Role.SYSTEM:
                 new_history.add_message(msg)
+
+        # Preserve MCP state from old session before creating new one
+        old_mcp_groups = getattr(self.session, '_mcp_server_groups', {})
+        old_mcp_connections = getattr(self.session, '_mcp_connections', {})
 
         # Create new session with preserved history
         self.session = ChatSession.create_with_history(
@@ -317,6 +321,18 @@ class ChatController(ABC):
             budget_manager=self.budget_manager,
             user_id=self.user_mail
         )
+        # Preserve MCP server groups and connections (tools are in the global registry)
+        self.session._mcp_server_groups = old_mcp_groups
+        self.session._mcp_connections = old_mcp_connections
+        # Preserve context preamble (includes doc plugins + MCP hints)
+        self.session._context_preamble = self.context_preamble
+        # Preserve system prompt suffix (auto-discover catalog)
+        ad_catalog = getattr(self, "_auto_discover_catalog", None)
+        if ad_catalog:
+            self.session._system_prompt_suffix = ad_catalog
+        # Preserve condensed summary so conversation context survives model switch
+        if old_condensed:
+            self.session._condensed_summary = old_condensed
 
         # Update state
         self.config = new_config
@@ -452,17 +468,8 @@ class ChatController(ABC):
         logger.info(f"[TOOLS] After sync: enabled_tools={self.enabled_tools}, available_tools={self.available_tools}")
 
     def _is_tool_available_for_provider(self, tool: ToolDefinition, provider: str) -> bool:
-        """Check if a tool is available for a given provider.
-
-        A tool is available if:
-        - requires_provider is None or matches the provider, AND
-        - provider is NOT in exclude_providers
-        """
-        if tool.requires_provider and tool.requires_provider != provider:
-            return False
-        if tool.exclude_providers and provider in tool.exclude_providers:
-            return False
-        return True
+        """Check if a tool is available for a given provider."""
+        return tool.is_available_for_provider(provider)
 
     def get_all_known_tools(self) -> List[dict]:
         """Get unified list of all known tools with availability and toggle state.
@@ -470,51 +477,107 @@ class ChatController(ABC):
         - Built-in tools are de-duplicated (web_search:openai / web_search:anthropic -> single entry).
         - MCP tools are listed individually with is_mcp_group=True and the server's category,
           so the JS UI renders them in a category sub-menu with per-tool toggles.
+        - For categories like "Documents", tools are collapsed into one entry per MCP server.
         """
         registry = get_default_registry()
         all_tools = registry.get_visible()
 
-        # Build lookup: tool_name -> server group metadata
+        # Build lookup: tool_name -> (group_id, group_meta)
         server_groups = getattr(self.session, '_mcp_server_groups', {})
         mcp_tool_group: Dict[str, Dict[str, Any]] = {}
-        for group in server_groups.values():
+        mcp_tool_group_id: Dict[str, str] = {}
+        hidden_tool_names: set = set()
+        for group_id, group in server_groups.items():
+            if group.get("hidden"):
+                hidden_tool_names.update(group.get("tool_names", []))
+                continue
             for tn in group.get("tool_names", []):
                 mcp_tool_group[tn] = group
+                mcp_tool_group_id[tn] = group_id
+
+        # Categories where individual tools are hidden; one toggle per MCP server
+        collapsed_categories = {"Documents"}
 
         # De-duplicate built-in / provider-native tools; emit MCP tools individually
         seen: Dict[str, dict] = {}
+        # Track collapsed MCP groups so we emit one entry per group
+        collapsed_groups_seen: Dict[str, str] = {}  # group_id -> entry key in seen
         for tool in all_tools:
             canonical = tool.name.split(":")[0]
+            if canonical in hidden_tool_names:
+                continue
 
             available = self._is_tool_available_for_provider(tool, self.provider)
             enabled = canonical in self.enabled_tools
 
             group = mcp_tool_group.get(canonical)
             if group:
-                # MCP tool — use server group's category; tool's own display_name/icon
+                gid = mcp_tool_group_id.get(canonical, "")
+                cat = group.get("category", "General")
                 exclude = group.get("exclude_providers")
+                requires = group.get("requires_providers")
                 available = not (exclude and self.provider in exclude)
+                if available and requires:
+                    from llming_lodge.tools.tool_definition import PROVIDER_COMPAT
+                    effective = PROVIDER_COMPAT.get(self.provider, self.provider)
+                    available = (self.provider in requires or effective in requires)
 
-                entry = {
-                    "name": canonical,
-                    "display_name": tool.get_display_name(),
-                    "description": tool.get_ui_description(),
-                    "category": group.get("category", "General"),
-                    "icon": tool.get_icon() or "smart_toy",
-                    "available": available,
-                    "enabled": enabled,
-                    "is_mcp_group": True,
-                    "server_label": group.get("label", ""),
-                    "server_description": group.get("description", ""),
-                }
-                seen[canonical] = entry
+                req_prov = requires if not available else None
+
+                if cat in collapsed_categories or group.get("collapse_tools"):
+                    # Collapsed: one entry per MCP server group
+                    if gid in collapsed_groups_seen:
+                        # Already emitted — just track enabled state
+                        existing = seen[collapsed_groups_seen[gid]]
+                        if enabled:
+                            existing["_any_enabled"] = True
+                        existing["_tool_names"].append(canonical)
+                        continue
+                    all_group_tools = group.get("tool_names", [])
+                    any_enabled = any(tn in self.enabled_tools for tn in all_group_tools)
+                    entry = {
+                        "name": gid,
+                        "display_name": group.get("label", gid),
+                        "description": group.get("description", ""),
+                        "category": cat,
+                        "icon": "smart_toy",
+                        "available": available,
+                        "enabled": any_enabled,
+                        "is_mcp_group": True,
+                        "server_label": group.get("label", ""),
+                        "server_description": group.get("description", ""),
+                        "group_id": gid,
+                        "collapse_tools": True,
+                        "flyout": group.get("flyout", False),
+                        "required_provider": req_prov,
+                        "_any_enabled": any_enabled,
+                        "_tool_names": list(all_group_tools),
+                    }
+                    seen[gid] = entry
+                    collapsed_groups_seen[gid] = gid
+                else:
+                    entry = {
+                        "name": canonical,
+                        "display_name": tool.get_display_name(),
+                        "description": tool.get_ui_description(),
+                        "category": cat,
+                        "icon": tool.get_icon() or "smart_toy",
+                        "available": available,
+                        "enabled": enabled,
+                        "is_mcp_group": True,
+                        "server_label": group.get("label", ""),
+                        "server_description": group.get("description", ""),
+                        "group_id": gid,
+                        "flyout": group.get("flyout", False),
+                        "required_provider": req_prov,
+                    }
+                    seen[canonical] = entry
             else:
                 # Built-in / provider-native tool
                 required_provider = None
-                if tool.requires_provider and tool.requires_provider != self.provider:
-                    required_provider = tool.requires_provider
-                if tool.exclude_providers and self.provider in tool.exclude_providers:
-                    required_provider = "another provider"
+                if not tool.is_available_for_provider(self.provider):
+                    rp = tool.requires_providers or ([tool.requires_provider] if tool.requires_provider else None)
+                    required_provider = rp or ["another provider"]
 
                 category = tool.ui.category.capitalize() if tool.ui and tool.ui.category else "General"
 
@@ -535,7 +598,13 @@ class ChatController(ABC):
                 if canonical not in seen or (available and not seen[canonical]["available"]):
                     seen[canonical] = entry
 
-        return list(seen.values())
+        # Clean up internal fields from collapsed groups
+        result = []
+        for entry in seen.values():
+            entry.pop("_any_enabled", None)
+            entry.pop("_tool_names", None)
+            result.append(entry)
+        return result
 
     def toggle_tool(self, tool_name: str, enabled: bool) -> None:
         """Toggle a tool or MCP server group on or off.
@@ -573,12 +642,13 @@ class ChatController(ABC):
         """
         tools = []
 
-        # Web search - available for OpenAI and Anthropic
-        if provider in ("openai", "anthropic"):
+        # Web search - available for OpenAI, Azure OpenAI and Anthropic
+        effective = PROVIDER_COMPAT.get(provider, provider)
+        if effective in ("openai", "anthropic"):
             tools.append("web_search")
 
-        # Image generation - DALL-E for OpenAI
-        if provider == "openai":
+        # Image generation - DALL-E for OpenAI (including Azure OpenAI)
+        if effective == "openai":
             tools.append("generate_image")
 
         # Also include MCP tools that are available for this provider
@@ -590,6 +660,15 @@ class ChatController(ABC):
                     # Check exclude_providers
                     if not tool.exclude_providers or provider not in tool.exclude_providers:
                         tools.append(canonical)
+
+        # Include BUILTIN callback tools without provider restrictions
+        # (e.g. consult_nudge) — these work with any provider
+        for tool in registry.get_all():
+            if (tool.source == ToolSource.BUILTIN
+                    and tool.callback
+                    and not tool.requires_provider
+                    and tool.name not in tools):
+                tools.append(tool.name)
 
         return tools
 

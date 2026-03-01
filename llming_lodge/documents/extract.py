@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Tuple, Union
 
 logger = logging.getLogger(__name__)
 
@@ -29,8 +29,8 @@ def _register_defaults() -> None:
     _EXTRACTORS["application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"] = extract_xlsx
 
 
-def extract_text(path: Path, mime_type: str) -> str:
-    """Extract text content from a document file.
+def extract_text(source: Union[Path, bytes], mime_type: str) -> str:
+    """Extract text content from a document file or raw bytes.
 
     Supports PDF, DOCX, and XLSX out of the box.
     Returns extracted text or an error message.
@@ -40,16 +40,34 @@ def extract_text(path: Path, mime_type: str) -> str:
     if extractor is None:
         return f"[Unsupported file type: {mime_type}]"
     try:
-        return extractor(path)
+        return extractor(source)
     except Exception as e:
-        logger.error(f"[DOC] Failed to extract text from {path}: {e}")
+        logger.error(f"[DOC] Failed to extract text from {source if isinstance(source, Path) else 'bytes'}: {e}")
         return f"[Error extracting text: {e}]"
+
+
+class TruncationResult:
+    """Result of truncate_to_token_budget with truncation metadata."""
+
+    __slots__ = ("documents", "was_truncated", "total_tokens_before", "budget_tokens")
+
+    def __init__(
+        self,
+        documents: List[Tuple[str, str]],
+        was_truncated: bool,
+        total_tokens_before: int,
+        budget_tokens: int,
+    ) -> None:
+        self.documents = documents
+        self.was_truncated = was_truncated
+        self.total_tokens_before = total_tokens_before
+        self.budget_tokens = budget_tokens
 
 
 def truncate_to_token_budget(
     documents: List[Tuple[str, str]],
     max_tokens: int = DEFAULT_MAX_TOKENS,
-) -> List[Tuple[str, str]]:
+) -> TruncationResult:
     """Truncate document texts so their combined size stays within a token budget.
 
     Args:
@@ -57,15 +75,18 @@ def truncate_to_token_budget(
         max_tokens: total token budget across all documents
 
     Returns:
-        list of (filename, possibly-truncated text) tuples
+        TruncationResult with truncated documents and metadata
     """
     max_chars = max_tokens * CHARS_PER_TOKEN
     remaining = max_chars
     result = []
+    was_truncated = False
+    total_chars_before = sum(len(text) for _, text in documents)
 
     for name, text in documents:
         if remaining <= 0:
             result.append((name, "[Skipped — token budget exhausted]"))
+            was_truncated = True
             continue
 
         if len(text) <= remaining:
@@ -79,5 +100,11 @@ def truncate_to_token_budget(
                 truncated = truncated[:last_nl]
             result.append((name, truncated + "\n\n[... truncated — document exceeded remaining token budget]"))
             remaining = 0
+            was_truncated = True
 
-    return result
+    return TruncationResult(
+        documents=result,
+        was_truncated=was_truncated,
+        total_tokens_before=total_chars_before // CHARS_PER_TOKEN,
+        budget_tokens=max_tokens,
+    )

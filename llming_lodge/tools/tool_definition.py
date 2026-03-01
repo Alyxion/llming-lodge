@@ -20,6 +20,7 @@ class ToolSource(str, Enum):
     MCP_STDIO = "mcp_stdio"          # Local MCP via stdio
     MCP_HTTP = "mcp_http"            # Remote MCP via HTTP/SSE
     MCP_INPROCESS = "mcp_inprocess"  # In-process MCP server (direct Python, no subprocess)
+    MCP_BROWSER = "mcp_browser"      # Browser-hosted MCP via WebSocket + Web Worker
     PROVIDER_NATIVE = "provider_native"  # Provider handles internally (e.g., OpenAI web_search)
 
 
@@ -31,6 +32,10 @@ class ToolUIMetadata(BaseModel):
     category: Optional[str] = Field(None, description="Category for grouping (search, media, file, etc.)")
     hidden: bool = Field(False, description="If True, tool is not shown in UI")
     color: Optional[str] = Field(None, description="Optional accent color for UI")
+
+
+# Providers that are API-compatible with another provider's tools
+PROVIDER_COMPAT: dict[str, str] = {"azure_openai": "openai"}
 
 
 class ToolDefinition(BaseModel):
@@ -56,10 +61,27 @@ class ToolDefinition(BaseModel):
     # Extensions
     ui: Optional[ToolUIMetadata] = Field(None, description="UI display metadata")
     fixed_cost_usd: Optional[float] = Field(None, description="Fixed cost per invocation in USD")
-    requires_provider: Optional[str] = Field(None, description="If set, tool only works with this provider")
+    requires_provider: Optional[str] = Field(None, description="If set, tool only works with this provider (singular, legacy)")
+    requires_providers: Optional[List[str]] = Field(None, description="If set, tool only works with these providers (respects PROVIDER_COMPAT). None = all.")
     exclude_providers: Optional[List[str]] = Field(None, description="Providers this tool does NOT support. None = no exclusions.")
+    realtime_enabled: bool = Field(False, description="If True, tool is available in live voice (Realtime API) sessions")
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    def is_available_for_provider(self, provider: str) -> bool:
+        """Check if this tool is available for a given provider."""
+        effective = PROVIDER_COMPAT.get(provider, provider)
+        # requires_providers (list) takes precedence over singular requires_provider
+        allowed = self.requires_providers
+        if allowed:
+            if provider not in allowed and effective not in allowed:
+                return False
+        elif self.requires_provider:
+            if self.requires_provider != provider and self.requires_provider != effective:
+                return False
+        if self.exclude_providers and provider in self.exclude_providers:
+            return False
+        return True
 
     def to_mcp_dict(self) -> Dict[str, Any]:
         """Convert to MCP-compatible tool dictionary."""
@@ -148,7 +170,7 @@ def get_web_search_tool_for_provider(provider: str) -> ToolDefinition:
 
 DEFAULT_IMAGE_GENERATION_TOOL = ToolDefinition(
     name="generate_image",
-    description="Generate images using DALL-E 3. Use this when the user asks you to create, draw, or generate an image.",
+    description="Generate images using GPT Image. Use this when the user asks you to create, draw, or generate an image.",
     inputSchema={
         "type": "object",
         "properties": {
@@ -158,15 +180,15 @@ DEFAULT_IMAGE_GENERATION_TOOL = ToolDefinition(
             },
             "size": {
                 "type": "string",
-                "enum": ["1024x1024", "1792x1024", "1024x1792"],
-                "description": "Image size. Use 1024x1024 for square, 1792x1024 for landscape, 1024x1792 for portrait.",
+                "enum": ["1024x1024", "1536x1024", "1024x1536"],
+                "description": "Image size. Use 1024x1024 for square, 1536x1024 for landscape, 1024x1536 for portrait.",
                 "default": "1024x1024"
             },
             "quality": {
                 "type": "string",
-                "enum": ["standard", "hd"],
-                "description": "Image quality. 'hd' produces higher detail but takes longer.",
-                "default": "standard"
+                "enum": ["low", "medium", "high"],
+                "description": "Image quality. 'high' produces more detail but costs more.",
+                "default": "medium"
             }
         },
         "required": ["prompt", "size", "quality"]
@@ -177,7 +199,7 @@ DEFAULT_IMAGE_GENERATION_TOOL = ToolDefinition(
         display_name="Generate Image",
         category="media"
     ),
-    fixed_cost_usd=0.04,  # Standard DALL-E 3 cost
+    fixed_cost_usd=0.042,  # Medium quality 1024x1024 gpt-image-1
     requires_provider="openai"
 )
 

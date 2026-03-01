@@ -1,0 +1,419 @@
+/* chat-sidebar.css — Projects section, collapsible sections, nudge items, show more */
+
+/* ══════════════════════════════════════════════════════════
+   Projects Section
+   ══════════════════════════════════════════════════════════ */
+
+.cv2-projects-section {
+  padding: 4px 0;
+}
+.cv2-project-item {
+  margin: 0;
+  border-radius: 0;
+}
+.cv2-project-item.cv2-project-active {
+  background: var(--chat-sidebar-active);
+}
+.cv2-project-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 12px;
+  cursor: pointer;
+  border-radius: 0;
+  font-size: 15px;
+  color: var(--chat-sidebar-text);
+  transition: background 0.15s;
+}
+.cv2-project-header:hover {
+  background: var(--chat-sidebar-hover);
+}
+.cv2-project-icon {
+  width: 20px;
+  height: 20px;
+  border-radius: 4px;
+  object-fit: cover;
+  flex-shrink: 0;
+}
+.cv2-project-icon-default {
+  font-size: 18px !important;
+  color: var(--chat-sidebar-text-muted);
+  flex-shrink: 0;
+}
+.cv2-project-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+}
+.cv2-project-new-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  margin: 0;
+  padding: 10px 12px;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  color: var(--chat-sidebar-text-muted);
+  font-size: 15px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s;
+  flex-shrink: 0;
+}
+.cv2-project-new-btn:hover {
+  background: var(--chat-sidebar-hover);
+  color: var(--chat-accent);
+}
+
+/* ══════════════════════════════════════════════════════════
+   Collapsible Sidebar Sections
+   ══════════════════════════════════════════════════════════ */
+
+.cv2-section {
+  padding: 2px 0;
+}
+.cv2-section + .cv2-section::before {
+  content: '';
+  display: block;
+  height: 1px;
+  margin: 4px 16px;
+  background: var(--chat-border, rgba(0,0,0,0.08));
+}
+.cv2-section:first-child {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--chat-border, rgba(0,0,0,0.10));
+}
+
+.cv2-section-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+  transition: background 0.15s;
+  border-radius: 0;
+}
+.cv2-section-header:hover {
+  background: var(--chat-sidebar-hover);
+}
+
+.cv2-section-icon {
+  width: 20px;
+  height: 20px;
+  opacity: 0.55;
+  flex-shrink: 0;
+}
+
+.cv2-section-label {
+  font-size: 14px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--chat-sidebar-text-muted);
+}
+
+.cv2-section-chevron {
+  margin-left: auto;
+  color: var(--chat-sidebar-text-muted);
+  opacity: 0;
+  transition: opacity 0.15s, transform 0.15s;
+}
+.cv2-section-header:hover .cv2-section-chevron {
+  opacity: 1;
+}
+
+.cv2-section.cv2-collapsed .cv2-section-content {
+  display: none;
+}
+
+/* ── Inline Nudge Items ────────────────────────────────── */
+
+.cv2-nudge-inline {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 12px;
+  cursor: pointer;
+  border-radius: 0;
+  transition: background 0.15s;
+  height: 36px;
+}
+.cv2-nudge-inline:hover {
+  background: var(--chat-sidebar-hover);
+}
+
+.cv2-nudge-inline-icon {
+  width: 20px;
+  height: 20px;
+  border-radius: 4px;
+  object-fit: cover;
+  flex-shrink: 0;
+}
+.cv2-nudge-inline-icon-default {
+  font-size: 18px !important;
+  color: var(--chat-accent);
+  flex-shrink: 0;
+  width: 20px;
+  text-align: center;
+}
+
+.cv2-nudge-inline-name {
+  flex: 1;
+  font-size: 16px;
+  font-weight: 400;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--chat-sidebar-text-muted);
+  line-height: 1.4;
+}
+.cv2-nudge-inline:hover .cv2-nudge-inline-name {
+  color: var(--chat-sidebar-text);
+}
+
+.cv2-nudge-inline-edit {
+  opacity: 0;
+  background: none;
+  border: none;
+  color: var(--chat-sidebar-text-muted);
+  cursor: pointer;
+  padding: 2px;
+  border-radius: 4px;
+  flex-shrink: 0;
+  transition: opacity 0.15s, color 0.15s;
+  line-height: 0;
+}
+.cv2-nudge-inline:hover .cv2-nudge-inline-edit {
+  opacity: 1;
+}
+.cv2-nudge-inline-edit:hover { color: var(--chat-accent); }
+
+/* ── Infinite-scroll Sentinel ──────────────────────────── */
+
+.cv2-scroll-sentinel { height: 1px; }
+
+.cv2-conv-nudge-icon {
+  flex-shrink: 0;
+}
+
+
+/* ══════════════════════════════════════════════════════════
+   Full-Screen Project View
+   ══════════════════════════════════════════════════════════ */
+
+.cv2-pv-hidden {
+  display: none !important;
+}
+
+.cv2-project-view {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0;
+  animation: cv2-fade-in 0.15s ease-out;
+  min-height: 0;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(0,0,0,0.1) transparent;
+}
+.cv2-project-view::-webkit-scrollbar { width: 6px; }
+.cv2-project-view::-webkit-scrollbar-track { background: transparent; }
+.cv2-project-view::-webkit-scrollbar-thumb { background: rgba(0,0,0,0.1); border-radius: 3px; }
+.cv2-project-view::-webkit-scrollbar-thumb:hover { background: rgba(0,0,0,0.2); }
+
+.cv2-pv-inner {
+  max-width: 680px;
+  margin: 0 auto;
+  padding: 40px 28px 24px;
+}
+
+.cv2-pv-header {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 32px;
+  padding-bottom: 20px;
+  border-bottom: 1px solid var(--chat-border, rgba(0,0,0,0.08));
+}
+
+.cv2-pv-icon {
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  object-fit: cover;
+  flex-shrink: 0;
+}
+.cv2-pv-icon-default {
+  font-size: 32px !important;
+  color: var(--chat-text-muted, #888);
+  flex-shrink: 0;
+  opacity: 0.5;
+}
+
+.cv2-pv-title {
+  font-size: 22px;
+  font-weight: 700;
+  flex: 1;
+  margin: 0;
+  color: var(--chat-text, #1a1a1a);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  letter-spacing: -0.3px;
+}
+
+.cv2-pv-edit {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 6px;
+  border-radius: 6px;
+  color: var(--chat-text-muted, #888);
+  transition: background 0.15s, opacity 0.15s;
+  opacity: 0.5;
+  flex-shrink: 0;
+}
+.cv2-pv-edit:hover {
+  background: var(--chat-sidebar-hover, rgba(0,0,0,0.06));
+  opacity: 1;
+}
+
+.cv2-pv-section {
+  margin-bottom: 24px;
+}
+
+.cv2-pv-section-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: var(--chat-text-muted, #888);
+  margin: 0 0 10px 0;
+  font-weight: 600;
+  opacity: 0.7;
+}
+
+.cv2-pv-count {
+  font-weight: 400;
+  opacity: 0.6;
+}
+
+.cv2-pv-desc {
+  font-size: 14px;
+  line-height: 1.7;
+  color: var(--chat-text, #1a1a1a);
+  margin: 0;
+  white-space: pre-wrap;
+  opacity: 0.7;
+}
+
+/* Knowledge file chips */
+.cv2-pv-files {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.cv2-pv-file {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 10px;
+  background: var(--chat-surface, #f5f5f5);
+  border: 1px solid var(--chat-border, rgba(0,0,0,0.06));
+  border-radius: 6px;
+  font-size: 12px;
+  color: var(--chat-text, #1a1a1a);
+  opacity: 0.8;
+}
+.cv2-pv-file .material-icons {
+  opacity: 0.5;
+}
+
+/* Conversation cards */
+.cv2-pv-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 10px;
+}
+
+.cv2-pv-card {
+  background: var(--chat-surface, #f5f5f5);
+  border: 1px solid var(--chat-border, rgba(0,0,0,0.06));
+  border-radius: 10px;
+  padding: 14px 16px;
+  cursor: pointer;
+  transition: border-color 0.15s, transform 0.1s;
+  position: relative;
+}
+.cv2-pv-card:hover {
+  border-color: var(--chat-accent, #003D8F);
+  transform: translateY(-1px);
+}
+
+.cv2-pv-card-title {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--chat-text, #1a1a1a);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding-right: 20px;
+}
+
+.cv2-pv-card-star {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  font-size: 14px !important;
+  color: #f5a623;
+}
+
+.cv2-pv-card-date {
+  font-size: 11px;
+  color: var(--chat-text-muted, #888);
+  margin-top: 4px;
+  opacity: 0.7;
+}
+
+.cv2-pv-empty {
+  font-size: 13px;
+  color: var(--chat-text-muted, #888);
+  padding: 12px 0;
+  opacity: 0.7;
+}
+
+/* Dark mode */
+#chat-app.cv2-dark .cv2-pv-card {
+  background: rgba(255,255,255,0.04);
+  border-color: rgba(255,255,255,0.06);
+}
+#chat-app.cv2-dark .cv2-pv-card:hover {
+  background: rgba(255,255,255,0.07);
+}
+#chat-app.cv2-dark .cv2-pv-file {
+  background: rgba(255,255,255,0.04);
+  border-color: rgba(255,255,255,0.06);
+}
+#chat-app.cv2-dark .cv2-pv-header {
+  border-bottom-color: rgba(255,255,255,0.06);
+}
+#chat-app.cv2-dark .cv2-project-view {
+  scrollbar-color: rgba(255,255,255,0.08) transparent;
+}
+#chat-app.cv2-dark .cv2-project-view::-webkit-scrollbar-thumb {
+  background: rgba(255,255,255,0.08);
+}
+#chat-app.cv2-dark .cv2-project-view::-webkit-scrollbar-thumb:hover {
+  background: rgba(255,255,255,0.15);
+}
+#chat-app.cv2-dark .cv2-pv-edit:hover {
+  background: rgba(255,255,255,0.08);
+}

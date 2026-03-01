@@ -55,3 +55,113 @@ offline/CSP-compatible use by the Chat static frontend.
    Homepage: https://github.com/google/material-design-icons
    Files: material-icons.css, fonts/MaterialIcons-Regular.woff2
    Full license: LICENSES/material-icons-LICENSE
+
+
+5. Plotly.js v2.35.2
+   ------------------
+   Interactive charting library
+   Copyright (c) 2012-2024, Plotly, Inc.
+   License: MIT
+   Homepage: https://github.com/plotly/plotly.js
+   Files: plotly.min.js (loaded on demand by document plugins)
+   Full license: LICENSES/plotly-LICENSE
+
+
+6. SheetJS (xlsx.js)
+   -----------------
+   Excel/spreadsheet file manipulation
+   Copyright (C) 2013-present SheetJS LLC
+   License: Apache-2.0
+   Homepage: https://sheetjs.com / https://github.com/SheetJS/sheetjs
+   Files: xlsx.full.min.js (loaded on demand by document plugins)
+   Full license: LICENSES/sheetjs-LICENSE
+
+
+7. PptxGenJS v4.0.1
+   -----------------
+   PowerPoint (PPTX) generation library
+   Copyright (c) 2015-2025 Brent Ely
+   License: MIT
+   Homepage: https://github.com/gitbrent/PptxGenJS
+   Files: pptxgenjs.bundle.min.js (loaded on demand by document plugins)
+   Full license: LICENSES/pptxgenjs-LICENSE
+
+   Bundles JSZip (MIT License):
+     Copyright (c) 2009-2016 Stuart Knightley, David Duponchel,
+     Franz Buchinger, António Afonso
+
+
+11. html2canvas v1.4.1
+    ------------------
+    Screenshot library for capturing DOM elements as canvas
+    Copyright (c) 2012 Niklas von Hertzen
+    License: MIT
+    Homepage: https://github.com/niklasvh/html2canvas
+    Files: html2canvas.min.js (loaded on demand for rendered PPTX export)
+    Full license: LICENSES/html2canvas-LICENSE
+
+
+12. Pacifico Font
+    ---------------
+    Handwriting-style display font
+    Copyright 2018 The Pacifico Project Authors (https://github.com/googlefonts/Pacifico)
+    License: OFL-1.1 (SIL Open Font License, Version 1.1)
+    Homepage: https://github.com/googlefonts/Pacifico
+    Files: fonts/Pacifico-Regular.woff2
+    Full license: LICENSES/pacifico-LICENSE
+
+
+The following icon sets are bundled in llming_lodge/static/icons/:
+
+
+8. Phosphor Icons
+   ---------------
+   SVG icon library
+   Copyright (c) 2020 Phosphor Icons
+   License: MIT
+   Homepage: https://github.com/phosphor-icons/core
+   Files: icons/phosphor/**/*.svg
+   Full license: ../../icons/phosphor/LICENSE
+
+
+9. Tabler Icons
+   -------------
+   SVG icon library
+   Copyright (c) 2020-2024 Paweł Kuna
+   License: MIT
+   Homepage: https://github.com/tabler/tabler-icons
+   Files: icons/tabler/**/*.svg
+   Full license: ../../icons/tabler/LICENSE
+
+
+10. Noto Emoji
+    -----------
+    SVG emoji by Google
+    Copyright Google LLC
+    License: Apache-2.0
+    Homepage: https://github.com/googlefonts/noto-emoji
+    Files: icons/noto-emoji/svg/*.svg
+    Full license: ../../icons/noto-emoji/LICENSE
+
+
+13. CodeMirror v5.65.18
+    --------------------
+    In-browser code editor
+    Copyright (C) 2017 by Marijn Haverbeke and others
+    License: MIT
+    Homepage: https://github.com/codemirror/codemirror5
+    Files: codemirror/codemirror.min.js, codemirror/codemirror.min.css,
+           codemirror/javascript.min.js, codemirror/matchbrackets.min.js,
+           codemirror/closebrackets.min.js, codemirror/lint.min.js,
+           codemirror/lint.min.css, codemirror/javascript-lint.min.js
+    Full license: LICENSES/codemirror-LICENSE
+
+
+14. JSHint v2.13.6
+    ---------------
+    JavaScript code quality tool
+    Copyright 2012 Anton Kovalyov
+    License: MIT
+    Homepage: https://github.com/jshint/jshint
+    Files: codemirror/jshint.min.js
+    Full license: LICENSES/jshint-LICENSE

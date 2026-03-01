@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Dev Dashboard</title>
+  <link rel="stylesheet" href="/dev-static/dashboard.css">
+</head>
+<body>
+
+<div class="auth-wrap" id="auth-screen">
+  <div class="auth-box">
+    <h2>Dev Dashboard</h2>
+    <div class="auth-hint" id="auth-hint" style="display:none"></div>
+    <input type="password" id="key-input" placeholder="Password" autofocus>
+    <button id="auth-btn">Connect</button>
+  </div>
+</div>
+
+<div id="dashboard">
+  <div class="tab-bar" id="tab-bar">
+    <button class="tab-btn active" data-tab="graphs">Graphs</button>
+    <button class="tab-btn" data-tab="process">Process</button>
+    <button class="tab-btn" data-tab="system">System</button>
+    <button class="tab-btn" data-tab="asyncio">Asyncio</button>
+    <button class="tab-btn" data-tab="llm">LLM</button>
+    <button class="tab-btn" data-tab="env">Environment</button>
+  </div>
+
+  <!-- Graphs tab -->
+  <div class="tab-panel active" id="tab-graphs">
+    <div class="header" id="header"></div>
+    <div class="graphs">
+      <div class="graph-wrap">
+        <div class="graph-title">Event Loop Delay (ms) &mdash; <span style="color:#4a9eff">avg</span> / <span style="color:#f44">max</span> / <span style="color:#888">jitter count</span></div>
+        <canvas id="c-loop"></canvas>
+      </div>
+      <div class="graph-wrap">
+        <div class="graph-title">CPU % &mdash; <span style="color:#4caf50">system</span> / <span style="color:#81c784">process</span></div>
+        <canvas id="c-cpu"></canvas>
+      </div>
+      <div class="graph-wrap">
+        <div class="graph-title">System Memory %</div>
+        <canvas id="c-mem"></canvas>
+      </div>
+      <div class="graph-wrap">
+        <div class="graph-title">Process RSS (MB)</div>
+        <canvas id="c-proc"></canvas>
+      </div>
+      <div class="graph-wrap">
+        <div class="graph-title">Per-CPU Utilization %</div>
+        <canvas id="c-percpu" style="height:80px"></canvas>
+      </div>
+    </div>
+  </div>
+
+  <!-- Process tab -->
+  <div class="tab-panel" id="tab-process">
+    <div class="info-grid" id="process-grid"></div>
+  </div>
+
+  <!-- System tab -->
+  <div class="tab-panel" id="tab-system">
+    <div class="info-grid" id="system-grid"></div>
+  </div>
+
+  <!-- Asyncio tab -->
+  <div class="tab-panel" id="tab-asyncio">
+    <div id="asyncio-content"></div>
+  </div>
+
+  <!-- LLM tab -->
+  <div class="tab-panel" id="tab-llm">
+    <div id="llm-content"></div>
+  </div>
+
+  <!-- Environment tab -->
+  <div class="tab-panel" id="tab-env">
+    <div id="env-content"></div>
+  </div>
+</div>
+
+<script src="/dev-static/dashboard.js"></script>
+</body>
+</html>

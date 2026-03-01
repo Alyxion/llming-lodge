@@ -104,7 +104,9 @@ class LlmClient(ABC):
 
         Args:
             messages: List of messages to send
-            usage_callback: Optional callback(input_tokens, output_tokens) called after each API iteration.
+            usage_callback: Optional callback(input_tokens, output_tokens, cached_input_tokens=0)
+                called after each API iteration. ``cached_input_tokens`` is the
+                subset of ``input_tokens`` that was served from cache (cheaper rate).
 
         Returns:
             AsyncIterator yielding response chunks

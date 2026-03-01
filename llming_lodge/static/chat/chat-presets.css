@@ -1,0 +1,711 @@
+/* chat-presets.css — Preset dialog, file list, capabilities, nudge chat header, user info row */
+
+/* ══════════════════════════════════════════════════════════
+   Preset Dialog (shared for projects + nudges)
+   ══════════════════════════════════════════════════════════ */
+
+/* ── Full-screen preset editor ───────── */
+.cv2-preset-fullscreen {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  background: var(--chat-bg);
+  animation: cv2-fade-in 0.15s ease-out;
+}
+.cv2-preset-panel {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  max-width: 720px;
+  background: var(--chat-surface);
+  border-right: 1px solid var(--chat-border);
+  flex-shrink: 0;
+  min-height: 0;
+}
+.cv2-preset-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--chat-border);
+  flex-shrink: 0;
+}
+.cv2-preset-header-title {
+  font-size: 17px;
+  font-weight: 600;
+  color: var(--chat-text);
+}
+.cv2-preset-back {
+  background: none;
+  border: none;
+  padding: 4px;
+  border-radius: 6px;
+  color: var(--chat-text-muted);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  transition: background 0.15s;
+}
+.cv2-preset-back:hover {
+  background: var(--chat-sidebar-hover);
+  color: var(--chat-text);
+}
+.cv2-preset-tabs {
+  display: flex;
+  gap: 0;
+  border-bottom: 1px solid var(--chat-border);
+  flex-shrink: 0;
+}
+.cv2-preset-tab {
+  flex: 1;
+  max-width: 160px;
+  background: none;
+  border: none;
+  padding: 10px 16px;
+  font-size: 14px;
+  font-weight: 500;
+  font-family: inherit;
+  color: var(--chat-text-muted);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  transition: color 0.15s, border-color 0.15s;
+}
+.cv2-preset-tab:hover {
+  color: var(--chat-text);
+}
+.cv2-preset-tab.cv2-active {
+  color: var(--chat-accent);
+  border-bottom-color: var(--chat-accent);
+}
+.cv2-preset-scroll {
+  flex: 1;
+  overflow-y: auto;
+  padding: 24px 28px;
+}
+.cv2-preset-tab-content {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.cv2-preset-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  width: 100%;
+  max-width: 560px;
+}
+.cv2-preset-icon-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 4px;
+}
+.cv2-preset-icon-name-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 4px;
+}
+.cv2-preset-icon-preview {
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  border: 2px dashed var(--chat-border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  flex-shrink: 0;
+  background: var(--chat-surface);
+}
+.cv2-preset-icon-preview.cv2-has-icon {
+  border: 1.5px solid var(--chat-border);
+}
+.cv2-preset-icon-preview img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.cv2-preset-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 12px;
+  font-size: 13px;
+  background: var(--chat-surface);
+  border: 1px solid var(--chat-border-strong, #d1d5db);
+  border-radius: 6px;
+  color: var(--chat-text);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.cv2-preset-icon-btn:hover {
+  color: var(--chat-text);
+  border-color: var(--chat-accent);
+}
+.cv2-preset-icon-remove {
+  padding: 5px 6px;
+}
+.cv2-preset-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--chat-text);
+  margin-top: 4px;
+}
+.cv2-preset-input,
+.cv2-preset-textarea,
+.cv2-preset-select {
+  width: 100%;
+  padding: 9px 12px;
+  font-size: 14px;
+  background: var(--chat-surface);
+  border: 1px solid var(--chat-border-strong, #d1d5db);
+  border-radius: 8px;
+  color: var(--chat-text);
+  outline: none;
+  font-family: inherit;
+  transition: border-color 0.15s;
+  box-sizing: border-box;
+}
+.cv2-preset-input:focus,
+.cv2-preset-textarea:focus,
+.cv2-preset-select:focus {
+  border-color: var(--chat-accent);
+}
+.cv2-preset-textarea {
+  resize: vertical;
+  min-height: 80px;
+  line-height: 1.5;
+}
+.cv2-preset-input::placeholder,
+.cv2-preset-textarea::placeholder {
+  color: var(--chat-text-muted);
+  opacity: 0.7;
+}
+.cv2-preset-row {
+  display: flex;
+  gap: 12px;
+}
+.cv2-preset-field {
+  flex: 1;
+}
+.cv2-preset-danger-zone {
+  margin-top: 32px;
+  padding-top: 16px;
+  border-top: 1px solid var(--chat-border);
+}
+.cv2-preset-delete-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: none;
+  border: none;
+  color: var(--chat-text-muted);
+  font-size: 13px;
+  cursor: pointer;
+  padding: 4px 0;
+  transition: color 0.15s;
+}
+.cv2-preset-delete-link:hover {
+  color: #ef4444;
+}
+
+/* ── Preset File List ─────────────────────────────── */
+
+.cv2-preset-files {
+  margin-top: 4px;
+}
+
+.cv2-preset-file-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+.cv2-preset-file-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--chat-surface);
+  border: 1px solid var(--chat-border-strong, #d1d5db);
+  border-radius: 8px;
+  font-size: 13px;
+}
+
+.cv2-preset-file-item.cv2-preset-file-broken {
+  border-color: #f59e0b;
+  background: rgba(245, 158, 11, 0.06);
+}
+.cv2-preset-file-broken .cv2-preset-file-icon { color: #f59e0b; }
+.cv2-preset-file-broken .cv2-preset-file-name { color: var(--chat-text-muted); }
+
+.cv2-preset-file-icon {
+  font-size: 16px !important;
+  color: var(--chat-text-muted);
+  flex-shrink: 0;
+}
+
+.cv2-preset-file-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--chat-text);
+  font-weight: 500;
+}
+
+.cv2-preset-file-size {
+  font-size: 12px;
+  color: var(--chat-text-muted);
+  white-space: nowrap;
+}
+
+.cv2-preset-file-tokens {
+  font-size: 12px;
+  color: var(--chat-accent);
+  white-space: nowrap;
+}
+
+.cv2-preset-file-remove {
+  background: none;
+  border: none;
+  color: var(--chat-text-muted);
+  cursor: pointer;
+  padding: 2px;
+  border-radius: 4px;
+  flex-shrink: 0;
+  transition: color 0.15s;
+}
+.cv2-preset-file-remove:hover {
+  color: #ef4444;
+}
+
+.cv2-preset-add-files-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 12px;
+  font-size: 13px;
+  background: var(--chat-surface);
+  border: 1px dashed var(--chat-border-strong, #d1d5db);
+  border-radius: 6px;
+  color: var(--chat-text-muted);
+  cursor: pointer;
+  transition: all 0.15s;
+  margin-top: 4px;
+}
+.cv2-preset-add-files-btn:hover {
+  color: var(--chat-accent);
+  border-color: var(--chat-accent);
+}
+
+.cv2-preset-token-bar {
+  margin-top: 6px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.cv2-preset-token-track {
+  flex: 1;
+  height: 4px;
+  background: var(--chat-border);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.cv2-preset-token-fill {
+  height: 100%;
+  border-radius: 2px;
+  background: var(--chat-accent);
+  transition: width 0.3s, background 0.3s;
+}
+
+.cv2-preset-token-fill.cv2-warn {
+  background: #d97706;
+}
+
+.cv2-preset-token-fill.cv2-over {
+  background: #ef4444;
+}
+
+.cv2-preset-token-label {
+  font-size: 12px;
+  color: var(--chat-text-muted);
+  white-space: nowrap;
+}
+
+/* ── Preset Capabilities (tool toggles) ────────── */
+
+.cv2-preset-capabilities {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.cv2-preset-cap-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  font-size: 14px;
+  color: var(--chat-text);
+  cursor: pointer;
+}
+
+.cv2-preset-cap-item input[type="checkbox"] {
+  accent-color: var(--chat-accent);
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.cv2-preset-cap-item .material-icons {
+  font-size: 16px;
+  color: var(--chat-text-muted);
+}
+
+/* Responsive: stack on narrow screens */
+@media (max-width: 560px) {
+  .cv2-preset-row { flex-direction: column; gap: 8px; }
+}
+
+/* ══════════════════════════════════════════════════════════
+   Nudge Chat Header (expanded + sticky compact)
+   ══════════════════════════════════════════════════════════ */
+
+.cv2-nudge-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 24px 16px 20px;
+  animation: cv2-greeting-in 0.5s ease-out both;
+}
+
+.cv2-nudge-header-icon {
+  width: 44px;
+  height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.cv2-nudge-header-icon img {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  object-fit: cover;
+  border: 1.5px solid var(--chat-border);
+}
+
+.cv2-nudge-header-icon .material-icons {
+  font-size: 36px;
+  color: var(--chat-text-muted);
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  border: 1.5px solid var(--chat-border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--chat-bg);
+}
+
+.cv2-nudge-header-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.cv2-nudge-header-name {
+  font-size: 18px;
+  font-weight: 700;
+  margin: 0;
+  color: var(--chat-text);
+}
+
+.cv2-nudge-header-desc {
+  font-size: 13px;
+  color: var(--chat-text-muted);
+  margin: 0;
+  line-height: 1.4;
+}
+
+/* Project chat bar — fixed above messages */
+.cv2-project-bar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 5px 16px;
+  flex-shrink: 0;
+}
+.cv2-project-bar-icon {
+  width: 14px;
+  height: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  opacity: 0.35;
+}
+.cv2-project-bar-icon img {
+  width: 14px;
+  height: 14px;
+  border-radius: 3px;
+  object-fit: cover;
+}
+.cv2-project-bar-icon .material-icons {
+  font-size: 14px;
+  color: var(--chat-text-muted);
+}
+.cv2-project-bar-name {
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.3px;
+  color: var(--chat-text-muted);
+  opacity: 0.5;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Compact sticky bar */
+.cv2-nudge-sticky {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 16px;
+  background: var(--chat-surface-alt, rgba(0,0,0,0.06));
+  border-bottom: 1px solid var(--chat-border);
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.2s ease;
+  flex-shrink: 0;
+}
+.cv2-dark .cv2-nudge-sticky { background: rgba(255,255,255,0.04); }
+
+.cv2-nudge-sticky.cv2-visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.cv2-nudge-sticky-icon {
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.cv2-nudge-sticky-icon img {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  object-fit: cover;
+}
+
+.cv2-nudge-sticky-icon .material-icons {
+  font-size: 16px;
+  color: var(--chat-text-muted);
+}
+
+.cv2-nudge-sticky-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--chat-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ── Preset Dialog: User Info Row ─────────────────── */
+
+.cv2-preset-user-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  background: var(--chat-surface);
+  border: 1px solid var(--chat-border);
+  border-radius: 8px;
+  margin-top: 4px;
+}
+
+.cv2-preset-user-avatar {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  object-fit: cover;
+  flex-shrink: 0;
+}
+
+.cv2-preset-user-avatar-default {
+  font-size: 22px !important;
+  color: var(--chat-text-muted);
+  flex-shrink: 0;
+}
+
+.cv2-preset-user-name {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--chat-text);
+}
+
+/* ── MCP Drop Zone ─────────────────────────────── */
+.cv2-mcp-drop-zone {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 24px 16px;
+  border: 2px dashed var(--chat-border-strong, #d1d5db);
+  border-radius: 10px;
+  color: var(--chat-text-muted, #6b7280);
+  text-align: center;
+  font-size: 13px;
+  transition: border-color 0.2s, background 0.2s;
+  margin-bottom: 10px;
+}
+.cv2-mcp-drop-zone .material-icons {
+  font-size: 32px;
+  opacity: 0.5;
+}
+.cv2-mcp-drop-zone.cv2-mcp-drag-over {
+  border-color: var(--chat-accent, #3b82f6);
+  background: color-mix(in srgb, var(--chat-accent, #3b82f6) 8%, transparent);
+}
+
+/* ── MCP Editor ────────────────────────────────── */
+.cv2-mcp-editor-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0 10px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--chat-text, #1f2937);
+}
+.cv2-preset-back {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--chat-text-muted, #6b7280);
+  padding: 4px;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+}
+.cv2-preset-back:hover {
+  background: var(--chat-bg-hover, #f3f4f6);
+}
+#cv2-mcp-editor-container {
+  border: 1px solid var(--chat-border-strong, #d1d5db);
+  border-radius: 8px;
+  overflow: hidden;
+  min-height: 250px;
+}
+
+/* ── CodeMirror dark theme overrides ───────────── */
+#cv2-mcp-editor-container .CodeMirror {
+  height: 300px;
+  font-size: 13px;
+  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+  background: var(--chat-surface, #fff);
+  color: var(--chat-text, #1f2937);
+}
+#cv2-mcp-editor-container .CodeMirror-gutters {
+  background: var(--chat-bg-secondary, #f9fafb);
+  border-right-color: var(--chat-border, #e5e7eb);
+}
+#cv2-mcp-editor-container .CodeMirror-linenumber {
+  color: var(--chat-text-muted, #9ca3af);
+}
+#cv2-mcp-editor-container .CodeMirror-cursor {
+  border-left-color: var(--chat-text, #1f2937);
+}
+#cv2-mcp-editor-container .CodeMirror-selected {
+  background: color-mix(in srgb, var(--chat-accent, #3b82f6) 20%, transparent);
+}
+#cv2-mcp-editor-container .CodeMirror-activeline-background {
+  background: var(--chat-bg-hover, #f3f4f6);
+}
+/* Dark mode specifics */
+:root[data-theme="dark"] #cv2-mcp-editor-container .CodeMirror,
+.cv2-dark #cv2-mcp-editor-container .CodeMirror {
+  background: var(--chat-surface, #1e1e2e);
+  color: var(--chat-text, #cdd6f4);
+}
+:root[data-theme="dark"] #cv2-mcp-editor-container .CodeMirror-gutters,
+.cv2-dark #cv2-mcp-editor-container .CodeMirror-gutters {
+  background: var(--chat-bg-secondary, #181825);
+}
+
+/* ── MCP file edit icon ────────────────────────── */
+.cv2-mcp-file-edit {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--chat-text-muted, #9ca3af);
+  padding: 2px;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+.cv2-preset-file-item:hover .cv2-mcp-file-edit {
+  opacity: 1;
+}
+.cv2-mcp-file-edit:hover {
+  color: var(--chat-accent, #3b82f6);
+}
+.cv2-mcp-file-clickable .cv2-preset-file-name {
+  cursor: pointer;
+}
+.cv2-mcp-file-clickable .cv2-preset-file-name:hover {
+  text-decoration: underline;
+  color: var(--chat-accent, #3b82f6);
+}
+
+/* ── MCP Test Runner Log ─────────────────────────── */
+.cv2-mcp-tool-chip {
+  display: inline-block;
+  margin: 2px 4px;
+  padding: 2px 8px;
+  background: rgba(88, 152, 212, 0.15);
+  color: var(--chat-text, #cdd6f4);
+  border: 1px solid rgba(88, 152, 212, 0.3);
+  border-radius: 4px;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-size: 11px;
+}
+
+.cv2-mcp-test-log {
+  margin-top: 8px;
+  padding: 10px;
+  background: var(--chat-bg-secondary, #1e1e2e);
+  color: var(--chat-text, #cdd6f4);
+  border-radius: 8px;
+  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  max-height: 200px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  -webkit-user-select: text;
+  user-select: text;
+  cursor: text;
+}

@@ -1,0 +1,28 @@
+THIRD-PARTY NOTICES
+
+This directory contains icons from third-party libraries. Each library
+retains its original license, included in its subdirectory.
+
+================================================================================
+
+Noto Emoji
+Copyright 2021 Google LLC
+License: SIL Open Font License 1.1 (OFL-1.1)
+Source: https://github.com/googlefonts/noto-emoji
+See: noto-emoji/LICENSE
+
+================================================================================
+
+Phosphor Icons
+Copyright (c) 2024 Phosphor Icons
+License: MIT
+Source: https://github.com/phosphor-icons/core
+See: phosphor/LICENSE
+
+================================================================================
+
+Tabler Icons
+Copyright (c) 2020-2024 Paweł Kuna
+License: MIT
+Source: https://github.com/tabler/tabler-icons
+See: tabler/LICENSE

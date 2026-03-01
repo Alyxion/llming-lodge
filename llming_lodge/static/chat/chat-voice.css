@@ -1,0 +1,616 @@
+/* chat-voice.css — Voice popup, speech mode, TTS word highlighting, realtime dialog */
+
+/* ── Voice Popup Overlay ─────────────────────────── */
+
+.cv2-voice-popup {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.75);
+  z-index: 10002;
+  display: grid;
+  place-items: center;
+}
+
+.cv2-voice-card {
+  width: min(700px, 95vw);
+  border-radius: 20px;
+  background: #1a1a2e;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow: 0 34px 90px rgba(0, 0, 0, 0.52);
+  padding: 24px;
+}
+
+.cv2-voice-card h3 {
+  margin: 0 0 8px;
+  color: #f6f4ef;
+  text-align: center;
+  font-size: clamp(1.2rem, 2.5vw, 1.6rem);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+
+.cv2-voice-wave-strip {
+  position: relative;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  background: rgba(255, 255, 255, 0.04);
+  padding: 8px 12px;
+  margin: 14px 0 10px;
+}
+
+.cv2-voice-wave-strip canvas {
+  width: 100%;
+  height: 56px;
+  display: block;
+}
+
+.cv2-voice-analytics {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.cv2-voice-analytics canvas {
+  width: 100%;
+  height: 42px;
+  display: block;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.cv2-voice-note {
+  margin: 8px 0;
+  color: #b8bbc4;
+  font-size: 0.9rem;
+  text-align: center;
+}
+
+/* Voice select inherits from .cv2-gear-submenu select */
+
+.cv2-voice-actions {
+  display: flex;
+  justify-content: center;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.cv2-voice-btn-send,
+.cv2-voice-btn-cancel {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 20px;
+  border: none;
+  border-radius: 10px;
+  cursor: pointer;
+  font-size: 14px;
+  font-family: inherit;
+  transition: all 0.15s;
+}
+
+.cv2-voice-btn-send {
+  background: var(--chat-accent);
+  color: #fff;
+}
+.cv2-voice-btn-send:hover { opacity: 0.9; }
+
+.cv2-voice-btn-cancel {
+  background: rgba(255, 255, 255, 0.1);
+  color: #ccc;
+}
+.cv2-voice-btn-cancel:hover { background: rgba(255, 255, 255, 0.18); }
+
+/* Long-press ring animation on speech mode button */
+.cv2-long-press-ring {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  pointer-events: none;
+  opacity: 0;
+  background: var(--chat-accent);
+  transform: scale(0);
+  z-index: -1;
+  transition: transform .15s ease-in, opacity .15s ease-in;
+}
+.cv2-long-press-ring.cv2-long-press-active {
+  opacity: .25;
+  transform: scale(2.4);
+  transition: transform 2s ease-out, opacity .15s ease-out;
+}
+
+/* Recording pulse on speech mode button */
+#cv2-speech-mode-btn.cv2-recording {
+  background: var(--chat-accent);
+  color: #fff;
+  animation: cv2-pulse 1s ease-in-out infinite;
+}
+@keyframes cv2-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+/* ── Voice Avatar (speech mode) ──────────────────── */
+
+.cv2-voice-avatar-slot {
+  display: none;
+}
+.cv2-voice-popup.cv2-speech-mode .cv2-voice-avatar-slot {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.cv2-voice-avatar {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  object-fit: cover;
+  border: 2px solid rgba(255, 255, 255, 0.15);
+  transition: border-color 0.3s;
+}
+.cv2-speech-recording .cv2-voice-avatar-slot .cv2-voice-avatar {
+  border-color: var(--chat-accent, #4f46e5);
+}
+.cv2-speech-responding .cv2-voice-avatar-slot .cv2-voice-avatar {
+  border-color: #10b981;
+}
+.cv2-voice-avatar-initials {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.12);
+  color: #f0f2f8;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  border: 2px solid rgba(255, 255, 255, 0.15);
+  transition: border-color 0.3s;
+}
+.cv2-speech-recording .cv2-voice-avatar-slot .cv2-voice-avatar-initials {
+  border-color: var(--chat-accent, #4f46e5);
+}
+.cv2-speech-responding .cv2-voice-avatar-slot .cv2-voice-avatar-initials {
+  border-color: #10b981;
+}
+
+/* ── Speech Mode ─────────────────────────────────── */
+
+/* Thinking animation in voice popup */
+.cv2-voice-thinking {
+  display: none;
+  justify-content: center;
+  align-items: center;
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+/* Mascot in voice popup */
+.cv2-voice-mascot {
+  display: none;
+  width: 80px;
+  height: 80px;
+  margin: 0 auto 8px;
+  border-radius: 50%;
+  object-fit: contain;
+}
+
+/* Speech mode active state */
+.cv2-voice-mode-active {
+  display: none;
+}
+
+/* ── Speech Mode: compact top-bar layout ────────── */
+.cv2-voice-popup.cv2-speech-mode {
+  background: transparent;
+  place-items: start center;
+  padding-top: 0;
+}
+.cv2-voice-popup.cv2-speech-mode .cv2-voice-card {
+  width: min(640px, 96vw);
+  padding: 10px 16px;
+  border-radius: 0 0 16px 16px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: nowrap;
+}
+/* Hide large elements in speech mode */
+.cv2-voice-popup.cv2-speech-mode .cv2-voice-mascot,
+.cv2-voice-popup.cv2-speech-mode h3,
+.cv2-voice-popup.cv2-speech-mode .cv2-voice-analytics,
+.cv2-voice-popup.cv2-speech-mode .cv2-voice-actions {
+  display: none !important;
+}
+/* Waveform: inline, compact */
+.cv2-voice-popup.cv2-speech-mode .cv2-voice-wave-strip {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  padding: 4px 8px;
+  border-radius: 8px;
+}
+.cv2-voice-popup.cv2-speech-mode .cv2-voice-wave-strip canvas {
+  height: 28px;
+}
+/* Status note: inline */
+.cv2-voice-popup.cv2-speech-mode .cv2-voice-note {
+  margin: 0;
+  font-size: 12px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+/* Buttons: inline row */
+.cv2-voice-popup.cv2-speech-mode .cv2-voice-mode-active {
+  display: flex;
+  gap: 6px;
+  margin: 0;
+  flex-shrink: 0;
+}
+.cv2-voice-popup.cv2-speech-mode .cv2-speech-send-btn,
+.cv2-voice-popup.cv2-speech-mode .cv2-speech-interrupt-btn,
+.cv2-voice-popup.cv2-speech-mode .cv2-voice-mode-exit {
+  padding: 5px 12px;
+  font-size: 12px;
+  border-radius: 8px;
+}
+.cv2-voice-popup.cv2-speech-mode .cv2-voice-mode-exit .material-icons,
+.cv2-voice-popup.cv2-speech-mode .cv2-speech-send-btn .material-icons,
+.cv2-voice-popup.cv2-speech-mode .cv2-speech-interrupt-btn .material-icons {
+  font-size: 15px;
+}
+.cv2-voice-mode-exit {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 20px;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 12px;
+  background: rgba(255, 60, 60, 0.15);
+  color: rgba(255, 255, 255, 0.85);
+  cursor: pointer;
+  font-size: 13px;
+  transition: background 0.15s;
+}
+.cv2-voice-mode-exit:hover {
+  background: rgba(255, 60, 60, 0.3);
+}
+.cv2-voice-mode-exit .material-icons {
+  font-size: 18px;
+}
+
+/* Speech mode Send + Interrupt buttons */
+.cv2-speech-send-btn,
+.cv2-speech-interrupt-btn {
+  display: none;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 20px;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 12px;
+  color: rgba(255, 255, 255, 0.85);
+  cursor: pointer;
+  font-size: 13px;
+  transition: background 0.15s;
+}
+.cv2-speech-send-btn .material-icons,
+.cv2-speech-interrupt-btn .material-icons {
+  font-size: 18px;
+}
+.cv2-speech-send-btn {
+  background: rgba(var(--chat-accent-rgb), 0.25);
+  border-color: rgba(var(--chat-accent-rgb), 0.4);
+}
+.cv2-speech-send-btn:hover {
+  background: rgba(var(--chat-accent-rgb), 0.4);
+}
+.cv2-speech-interrupt-btn {
+  background: rgba(245, 158, 11, 0.2);
+  border-color: rgba(245, 158, 11, 0.35);
+}
+.cv2-speech-interrupt-btn:hover {
+  background: rgba(245, 158, 11, 0.35);
+}
+
+/* Phase-based button visibility */
+.cv2-speech-recording .cv2-speech-send-btn { display: inline-flex; }
+.cv2-speech-responding .cv2-speech-interrupt-btn { display: inline-flex; }
+
+/* ── TTS Word Highlighting ───────────────────────── */
+
+.cv2-word-active {
+  font-weight: 700;
+  text-decoration: underline;
+  text-decoration-color: var(--chat-accent);
+  text-underline-offset: 3px;
+}
+
+.cv2-tts-replay-btn {
+  display: inline-flex;
+  align-items: center;
+  background: none;
+  border: 1px solid var(--chat-border);
+  border-radius: 8px;
+  padding: 4px 8px;
+  cursor: pointer;
+  color: var(--chat-text-muted);
+  margin-top: 8px;
+  transition: all 0.15s;
+}
+.cv2-tts-replay-btn:hover {
+  background: rgba(0, 0, 0, 0.05);
+  color: var(--chat-text);
+}
+.cv2-tts-replay-btn .material-icons {
+  font-size: 18px;
+}
+
+/* ── Inline Voice Bar (embedded in input area) ──── */
+
+.cv2-inline-voice-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  min-height: 48px;
+  background: #1a1a2e;
+  border-radius: 14px;
+  margin: 4px;
+  color: #f0f2f8;
+}
+
+.cv2-ivb-avatar {
+  flex-shrink: 0;
+}
+
+.cv2-ivb-avatar .cv2-voice-avatar {
+  width: 32px;
+  height: 32px;
+}
+
+.cv2-ivb-avatar .cv2-voice-avatar-initials {
+  width: 32px;
+  height: 32px;
+  font-size: 11px;
+}
+
+.cv2-ivb-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  position: relative;
+}
+
+.cv2-ivb-status {
+  font-size: 12px;
+  color: #b8bbc4;
+  white-space: nowrap;
+  flex-shrink: 0;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cv2-ivb-wave {
+  flex: 1;
+  height: 28px;
+  min-width: 60px;
+  display: block;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.cv2-ivb-thinking {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  color: rgba(255, 255, 255, 0.6);
+}
+
+.cv2-ivb-actions {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.cv2-ivb-btn {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.cv2-ivb-btn .material-icons {
+  font-size: 18px;
+}
+
+/* Exit/close button — always visible */
+.cv2-ivb-exit {
+  display: flex;
+  background: rgba(255, 60, 60, 0.15);
+  color: rgba(255, 100, 100, 0.9);
+}
+.cv2-ivb-exit:hover {
+  background: rgba(255, 60, 60, 0.3);
+}
+
+/* Send button: visible during recording */
+.cv2-inline-voice-bar.cv2-speech-recording .cv2-ivb-send {
+  display: flex;
+  background: rgba(var(--chat-accent-rgb), 0.2);
+  color: var(--chat-accent);
+}
+.cv2-ivb-send:hover {
+  background: rgba(var(--chat-accent-rgb), 0.35);
+}
+
+/* Interrupt button: visible during responding */
+.cv2-inline-voice-bar.cv2-speech-responding .cv2-ivb-interrupt {
+  display: flex;
+  background: rgba(245, 158, 11, 0.2);
+  color: rgb(245, 178, 60);
+}
+.cv2-ivb-interrupt:hover {
+  background: rgba(245, 158, 11, 0.35);
+}
+
+/* Avatar border color by phase */
+.cv2-inline-voice-bar.cv2-speech-recording .cv2-voice-avatar,
+.cv2-inline-voice-bar.cv2-speech-recording .cv2-voice-avatar-initials {
+  border-color: var(--chat-accent, #4f46e5);
+}
+.cv2-inline-voice-bar.cv2-speech-responding .cv2-voice-avatar,
+.cv2-inline-voice-bar.cv2-speech-responding .cv2-voice-avatar-initials {
+  border-color: #10b981;
+}
+
+/* ── Push-to-Talk ──────────────────────────────── */
+
+.cv2-ivb-ptt {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  flex: 1;
+  height: 36px;
+  border: 2px dashed rgba(255, 255, 255, 0.15);
+  border-radius: 12px;
+  background: rgba(var(--chat-accent-rgb), 0.08);
+  color: rgba(255, 255, 255, 0.7);
+  cursor: pointer;
+  font-family: inherit;
+  transition: all 0.15s;
+}
+
+.cv2-ivb-ptt .material-icons {
+  font-size: 22px;
+  color: var(--chat-accent);
+}
+
+.cv2-ivb-ptt:hover {
+  background: rgba(var(--chat-accent-rgb), 0.2);
+  border-color: rgba(var(--chat-accent-rgb), 0.4);
+}
+
+.cv2-ivb-ptt:active {
+  background: rgba(var(--chat-accent-rgb), 0.3);
+  border-style: solid;
+  border-color: var(--chat-accent);
+  transform: scale(0.97);
+}
+
+.cv2-ivb-ptt-hint {
+  font-size: 10px;
+  opacity: 0.5;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+}
+
+/* Show PTT button only in idle phase, hide waveform */
+.cv2-inline-voice-bar.cv2-speech-idle .cv2-ivb-ptt { display: flex; }
+.cv2-inline-voice-bar.cv2-speech-idle .cv2-ivb-wave { display: none; }
+.cv2-inline-voice-bar.cv2-speech-idle .cv2-ivb-send { display: none !important; }
+
+/* In PTT recording mode, hide the PTT button (release = send/commit) */
+.cv2-inline-voice-bar.cv2-speech-recording .cv2-ivb-ptt { display: none; }
+
+/* PTT toggle label in settings */
+.cv2-ptt-toggle-label {
+  justify-content: space-between !important;
+}
+
+/* Hide Space hint on touch-only devices (smartphones) */
+@media (hover: none) and (pointer: coarse) {
+  .cv2-ivb-ptt-hint { display: none; }
+}
+
+/* ── Realtime API (Live Voice) Dialog ────────────── */
+
+.cv2-realtime-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 10001;
+  background: rgba(0, 0, 0, 0.7);
+  display: none;
+  align-items: center;
+  justify-content: center;
+  backdrop-filter: blur(4px);
+}
+
+.cv2-realtime-card {
+  background: var(--chat-surface);
+  border-radius: 20px;
+  padding: 32px 40px;
+  width: min(480px, 90vw);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 20px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+}
+
+.cv2-realtime-status {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 16px;
+  color: var(--chat-text);
+}
+
+.cv2-realtime-orb {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #9ca3af;
+  transition: background 0.3s;
+}
+.cv2-realtime-orb.cv2-rt-active {
+  background: #10b981;
+  box-shadow: 0 0 12px rgba(16, 185, 129, 0.5);
+  animation: cv2-rt-pulse 2s ease-in-out infinite;
+}
+
+@keyframes cv2-rt-pulse {
+  0%, 100% { box-shadow: 0 0 8px rgba(16, 185, 129, 0.3); }
+  50% { box-shadow: 0 0 20px rgba(16, 185, 129, 0.6); }
+}
+
+.cv2-rt-wave {
+  width: 100%;
+  height: 80px;
+  border-radius: 8px;
+  background: var(--chat-bg);
+}
+
+.cv2-realtime-end {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 28px;
+  border: none;
+  border-radius: 999px;
+  background: #ef4444;
+  color: white;
+  font-size: 15px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.cv2-realtime-end:hover { background: #dc2626; }
+.cv2-realtime-end .material-icons { font-size: 20px; }

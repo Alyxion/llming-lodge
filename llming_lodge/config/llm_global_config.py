@@ -1,6 +1,5 @@
 import fnmatch
 from dataclasses import dataclass, field
-from typing import ClassVar
 
 @dataclass
 class LLMBaseConfig:
@@ -32,9 +31,11 @@ class LLMBaseConfig:
 @dataclass
 class LLMGlobalConfig(LLMBaseConfig):
     """Defines the global configuration for LLMs."""
-    default_models: dict[str, str] = field(default_factory=lambda: {"small": "openai:gpt-5-nano", "medium": "openai:gpt-5-mini", "large": "openai:gpt-5.2",
-                                                                    "reasoning_small": "openai:gpt-5-mini", "reasoning_medium": "openai:gpt-5.2", "reasoning_large": "openai:gpt-5.2"})
-    """Default models for providers."""
+    default_models: dict[str, str] = field(default_factory=lambda: {"small": "gpt-5-nano", "medium": "gpt-5-mini", "large": "gpt-5.2",
+                                                                    "reasoning_small": "gpt-5-mini", "reasoning_medium": "gpt-5.2", "reasoning_large": "gpt-5.2"})
+    """Default models for providers. Use bare model names (e.g. 'gpt-5-nano') for cascade resolution, or 'provider:model' to pin to a specific provider."""
+    provider_cascade: list[str] = field(default_factory=lambda: ["azure_openai", "openai", "anthropic", "mistral", "google", "together"])
+    """Ordered list of provider priorities. When a model is available from multiple providers, the first provider in this list wins."""
     budgets: list["LLMBudget"] = field(default_factory=list)
     """List of budgets."""
 

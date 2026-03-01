@@ -1,7 +1,7 @@
 """Chat session handling with LLM providers."""
 import logging
-import time
-from typing import Any, AsyncIterator, Dict, Iterator, List, Optional, Union
+import os
+from typing import Any, AsyncIterator, Dict, List, Optional, Union
 
 from pydantic import BaseModel, Field
 
@@ -68,6 +68,7 @@ class ChatSession:
         self.budget_manager = budget_manager
         self._system_prompt = system_prompt
         self._context_preamble: Optional[str] = None  # silently prepended to system prompt at API call time
+        self._system_prompt_suffix: Optional[str] = None  # appended AFTER system prompt (e.g., auto-discover catalog)
         self._client = None
         self._last_client_config = None
         self.user_id = user_id
@@ -98,6 +99,10 @@ class ChatSession:
         self._mcp_tools_discovered = False
         # Tracks tool grouping per MCP server: server_id -> {label, description, category, exclude_providers, tool_names}
         self._mcp_server_groups: Dict[str, Dict[str, Any]] = {}
+        # Prompt hints collected from in-process MCP servers
+        self._mcp_prompt_hints: List[str] = []
+        # Client-side renderers from in-process MCP servers
+        self._mcp_client_renderers: List[Dict[str, str]] = []
 
     def invalidate_client(self) -> None:
         """Invalidate the client and force a new client creation."""
@@ -135,9 +140,12 @@ class ChatSession:
                     enabled=getattr(server_config, 'enabled_by_default', False),
                     category=getattr(server_config, 'category', None),
                     exclude=getattr(server_config, 'exclude_providers', None),
+                    requires=getattr(server_config, 'requires_providers', None),
                     label=getattr(server_config, 'label', None),
                     description=getattr(server_config, 'description', None),
                     default_tools=getattr(server_config, 'default_enabled_tools', None),
+                    collapse_tools=getattr(server_config, 'collapse_tools', False),
+                    flyout=getattr(server_config, 'flyout', False),
                 )
             else:
                 server_id = server_config.get('command') or server_config.get('url') or server_config.get('label')
@@ -145,9 +153,12 @@ class ChatSession:
                     enabled=server_config.get('enabled_by_default', False),
                     category=server_config.get('category'),
                     exclude=server_config.get('exclude_providers'),
+                    requires=server_config.get('requires_providers'),
                     label=server_config.get('label'),
                     description=server_config.get('description'),
                     default_tools=server_config.get('default_enabled_tools'),
+                    collapse_tools=server_config.get('collapse_tools', False),
+                    flyout=server_config.get('flyout', False),
                 )
             meta['server_id'] = server_id
             meta['group_id'] = meta['label'] or server_id or f"mcp_{idx}"
@@ -183,6 +194,8 @@ class ChatSession:
                     tool.ui = ToolUIMetadata(category=meta['category'])
                 if meta['exclude']:
                     tool.exclude_providers = meta['exclude']
+                if meta['requires']:
+                    tool.requires_providers = meta['requires']
 
                 registry.register(tool)
                 self._mcp_connections[tool.name] = connection
@@ -191,9 +204,7 @@ class ChatSession:
 
                 # Decide whether to enable this tool
                 should_enable = False
-                if not early:
-                    should_enable = True
-                elif meta['enabled']:
+                if meta['enabled']:
                     if meta['default_tools'] is not None:
                         should_enable = tool.name in meta['default_tools']
                     else:
@@ -210,10 +221,41 @@ class ChatSession:
                 "description": meta['description'],
                 "category": meta['category'] or "General",
                 "exclude_providers": meta['exclude'],
+                "requires_providers": meta['requires'],
+                "collapse_tools": meta.get('collapse_tools', False),
+                "flyout": meta.get('flyout', False),
                 "tool_names": group_tool_names,
             }
 
+        # ── Phase 3: collect prompt hints & client renderers from in-process servers ──
+        for server_config in self.config.mcp_servers:
+            inst = getattr(server_config, 'server_instance', None)
+            if not inst:
+                continue
+            try:
+                hints = await inst.get_prompt_hints()
+                if hints:
+                    self._mcp_prompt_hints.extend(hints)
+            except Exception as e:
+                logger.warning(f"Failed to get prompt hints: {e}")
+            try:
+                renderers = await inst.get_client_renderers()
+                if renderers:
+                    self._mcp_client_renderers.extend(renderers)
+            except Exception as e:
+                logger.warning(f"Failed to get client renderers: {e}")
+
         self._mcp_tools_discovered = True
+
+    @property
+    def mcp_prompt_hints(self) -> List[str]:
+        """Prompt snippets collected from in-process MCP servers."""
+        return self._mcp_prompt_hints
+
+    @property
+    def mcp_client_renderers(self) -> List[Dict[str, str]]:
+        """Client-side renderers collected from in-process MCP servers."""
+        return self._mcp_client_renderers
 
     async def discover_tools(self) -> None:
         """Early tool discovery (before first message).
@@ -304,19 +346,32 @@ class ChatSession:
         from .providers.openai.openai_client import OpenAILlmClient
         import os
 
-        # Create cost callback for budget tracking
+        # Create cost callback for budget tracking.
+        # This is called from sync tool code but runs inside the event loop,
+        # so we schedule async operations as fire-and-forget tasks.
         def tool_cost_callback(tool_name: str, cost_usd: float):
             if self.budget_manager:
-                for limit in self.budget_manager.limits.values():
-                    limit.reserve_budget(cost_usd)
-                    limit.log_usage(
-                        model_name=f"openai.{tool_name}",
-                        tokens_input=0,
-                        tokens_output=0,
-                        costs=cost_usd,
-                        duration_ms=0,
-                        user_id=self.user_id
-                    )
+                import asyncio
+                async def _async_tool_cost():
+                    try:
+                        for limit in self.budget_manager.limits.values():
+                            await limit.reserve_budget_async(cost_usd)
+                            await limit.log_usage_async(
+                                model_name=f"openai.{tool_name}",
+                                tokens_input=0,
+                                tokens_output=0,
+                                costs=cost_usd,
+                                duration_ms=0,
+                                user_id=self.user_id,
+                                operation_type="tool_call",
+                            )
+                    except Exception as e:
+                        logger.warning(f"[TOOL COST] Failed to track cost for {tool_name}: {e}")
+                try:
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(_async_tool_cost())
+                except RuntimeError:
+                    pass  # No event loop, skip budget tracking
                 logger.debug(f"[TOOL COST] {tool_name}: ${cost_usd:.4f} reserved and logged")
 
         # Create OpenAI client for DALL-E image generation if needed
@@ -326,6 +381,15 @@ class ChatSession:
                 api_key=os.environ.get('OPENAI_API_KEY'),
                 model=self.config.model,
                 max_tokens=self.config.max_tokens
+            )
+        elif self.config.provider == "azure_openai":
+            openai_client = OpenAILlmClient(
+                api_key=os.environ.get('AZURE_OPENAI_API_KEY'),
+                model=self.config.model,
+                max_tokens=self.config.max_tokens,
+                api_type="azure",
+                api_version=os.environ.get('AZURE_OPENAI_API_VERSION', '2025-04-01-preview'),
+                base_url=os.environ.get('AZURE_OPENAI_ENDPOINT'),
             )
 
         # Get model's default tools
@@ -354,20 +418,26 @@ class ChatSession:
 
     def _prepare_messages(
         self,
-        system_prompt: Optional[str] = None
+        system_prompt: Optional[str] = None,
+        skip_preamble: bool = False,
     ) -> List[Union[LlmSystemMessage, LlmHumanMessage, LlmAIMessage]]:
         """Convert chat history to message format while respecting token limits."""
         # Use provided system prompt or fall back to default
         current_system_prompt = system_prompt if system_prompt is not None else self._system_prompt
 
         # Silently prepend context preamble (user identity, etc.)
-        if self._context_preamble:
+        if self._context_preamble and not skip_preamble:
             current_system_prompt = self._context_preamble + "\n\n" + (current_system_prompt or "")
 
         # Inject condensed summary into system prompt if available
         if self._condensed_summary:
             current_system_prompt = (current_system_prompt or "") + \
                 "\n\n---\n[Condensed conversation history]\n" + self._condensed_summary
+
+        # Append suffix at the very end (e.g., auto-discover knowledge base catalog)
+        # This ensures it's the last instruction the model reads, avoiding "lost in the middle"
+        if self._system_prompt_suffix:
+            current_system_prompt = (current_system_prompt or "") + "\n\n" + self._system_prompt_suffix
 
         # Calculate system prompt tokens
         system_tokens = 0
@@ -762,135 +832,6 @@ class ChatSession:
             tiles = max(1, (side + 511) // 512) ** 2
             return 170 * tiles + 85
 
-    def chat(
-        self,
-        message: str,
-        *,
-        streaming: bool = False,
-        system_prompt: Optional[str] = None,
-        temperature: Optional[float] = None,
-        max_tokens: Optional[int] = None,
-        images: Optional[List[str]] = None
-    ) -> Union[LlmAIMessage, Iterator[LlmMessageChunk]]:
-        """Send a message and get a response synchronously.
-
-        Args:
-            message: The message to send
-            streaming: If True, returns an Iterator[LlmMessageChunk] that yields response chunks.
-                     If False, returns a LlmAIMessage containing the complete response.
-            system_prompt: Optional system prompt to override the default
-            temperature: Optional temperature to override the default
-            max_tokens: Optional max_tokens to override the default
-            images: Optional list of base64-encoded images to include with the message
-        """
-        start_time = time.time()
-
-        self.add_message(Role.USER, message, images=images)
-        
-        messages = self._prepare_messages(system_prompt)
-        estimated_input_tokens = self._estimate_tokens(messages)
-        max_output_tokens = max_tokens if max_tokens is not None else (self.config.max_tokens or 4096)
-        
-        try:
-            # Reserve budget if budget manager is configured
-            if self.budget_manager:
-                self.budget_manager.reserve_budget(
-                    input_tokens=estimated_input_tokens,
-                    max_output_tokens=max_output_tokens,
-                    input_token_price=self.model_info.input_token_price,
-                    output_token_price=self.model_info.output_token_price
-                )
-
-            # Get client with current parameters
-            client = self._get_client(temperature=temperature, max_tokens=max_tokens)
-
-            if streaming:
-                # Streaming mode - return an Iterator
-                full_response = ""
-                text_only_response = ""  # Track only text tokens, not function results
-                last_chunk = None
-                def stream_response():
-                    nonlocal full_response, text_only_response, last_chunk
-                    for chunk in client.stream(messages):
-                        content = chunk.content
-                        full_response += content
-                        last_chunk = chunk
-                        # Only count text tokens, not function call results (which may contain huge base64 data)
-                        chunk_role = getattr(chunk, 'role', 'assistant')
-                        if chunk_role not in ('function', 'function_pending'):
-                            text_only_response += content
-                        chunk_obj = LlmMessageChunk(
-                            content=content,
-                            role=chunk.role if hasattr(chunk, 'role') else Role.ASSISTANT,
-                            index=last_chunk.index if hasattr(last_chunk, 'index') else 0,
-                            is_final=False,
-                            response_metadata=last_chunk.response_metadata if hasattr(last_chunk, 'response_metadata') else {}
-                        )
-                        yield chunk_obj
-
-                    # Return unused budget if budget manager is configured
-                    if self.budget_manager and last_chunk:
-                        # Only count text output tokens, not function call results
-                        actual_output_tokens = self._estimate_tokens([LlmAIMessage(content=text_only_response)])
-                        self.budget_manager.return_unused_budget(
-                            reserved_output_tokens=max_output_tokens,
-                            actual_output_tokens=actual_output_tokens,
-                            output_token_price=self.model_info.output_token_price
-                        )
-                        
-                        # Log usage information in all budget limits
-                        import time
-                        execution_time = time.time() - start_time
-                        for limit in self.budget_manager.limits.values():
-                            limit.log_usage(
-                                model_name=f"{self.config.provider}.{self.config.model}",
-                                tokens_input=estimated_input_tokens,
-                                tokens_output=actual_output_tokens,
-                                costs=(estimated_input_tokens * (self.model_info.input_token_price / 1_000_000) + 
-                                      actual_output_tokens * (self.model_info.output_token_price / 1_000_000)),
-                                duration_ms=execution_time * 1000,  # Convert to milliseconds
-                                user_id=self.user_id
-                            )
-                    
-                    self.add_message(Role.ASSISTANT, full_response)
-                
-                return stream_response()
-            else:
-                # Non-streaming mode - return a string
-                response = client.invoke(messages)
-                response_text = response.content
-                
-                # Return unused budget if budget manager is configured
-                if self.budget_manager:
-                    # Always use our own token calculation
-                    actual_output_tokens = self._estimate_tokens([LlmAIMessage(content=response_text)])
-                    self.budget_manager.return_unused_budget(
-                        reserved_output_tokens=max_output_tokens,
-                        actual_output_tokens=actual_output_tokens,
-                        output_token_price=self.model_info.output_token_price
-                    )
-                    
-                    # Log usage information in all budget limits
-                    execution_time = time.time() - start_time
-                    for limit in self.budget_manager.limits.values():
-                        limit.log_usage(
-                            model_name=f"{self.config.provider}.{self.config.model}",
-                            tokens_input=estimated_input_tokens,
-                            tokens_output=actual_output_tokens,
-                            costs=(estimated_input_tokens * (self.model_info.input_token_price / 1_000_000) + 
-                                  actual_output_tokens * (self.model_info.output_token_price / 1_000_000)),
-                            duration_ms=execution_time * 1000,  # Convert to milliseconds
-                            user_id=self.user_id
-                        )
-                
-                self.add_message(Role.ASSISTANT, response_text)
-                return LlmAIMessage(content=response_text, response_metadata=response.response_metadata or {})
-            
-        except Exception as e:
-            if isinstance(e, InsufficientBudgetError):
-                raise
-            raise RuntimeError(f"Error in chat completion: {str(e)}")
-
     async def chat_async(
         self,
         message: str,
@@ -899,7 +840,8 @@ class ChatSession:
         system_prompt: Optional[str] = None,
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
-        images: Optional[List[str]] = None
+        images: Optional[List[str]] = None,
+        skip_preamble: bool = False,
     ) -> Union[LlmAIMessage, AsyncIterator[LlmMessageChunk]]:
         """Send a message and get a response asynchronously.
 
@@ -914,6 +856,8 @@ class ChatSession:
         """
         import time
         start_time = time.time()
+        _pid = os.getpid()
+        _model = f"{self.config.provider}.{self.config.model}"
 
         # Discover MCP tools if configured (only on first call)
         logger.debug(f"[SESSION] chat_async: mcp_servers={self.config.mcp_servers}, discovered={self._mcp_tools_discovered}")
@@ -923,14 +867,17 @@ class ChatSession:
 
         self.add_message(Role.USER, message, images=images)
 
-        messages = self._prepare_messages(system_prompt)
+        messages = self._prepare_messages(system_prompt, skip_preamble=skip_preamble)
         estimated_input_tokens = self._estimate_tokens(messages)
         max_output_tokens = max_tokens if max_tokens is not None else (self.config.max_tokens or 4096)
+
+        logger.info("[OP] chat_async — starting (user=%s, model=%s, est_input=%d, max_output=%d, streaming=%s, pid=%d)",
+                     self.user_id, _model, estimated_input_tokens, max_output_tokens, streaming, _pid)
 
         try:
             # Reserve budget if budget manager is configured
             if self.budget_manager:
-                self.budget_manager.reserve_budget(
+                await self.budget_manager.reserve_budget_async(
                     input_tokens=estimated_input_tokens,
                     max_output_tokens=max_output_tokens,
                     input_token_price=self.model_info.input_token_price,
@@ -948,13 +895,15 @@ class ChatSession:
                 last_chunk = None
 
                 # Track live usage across API iterations via callback
-                live_usage = {'input_tokens': 0, 'output_tokens': 0}
+                live_usage = {'input_tokens': 0, 'output_tokens': 0, 'cached_input_tokens': 0}
 
-                def usage_callback(input_tokens: int, output_tokens: int):
+                def usage_callback(input_tokens: int, output_tokens: int, cached_input_tokens: int = 0):
                     """Called after each API iteration with that iteration's usage."""
                     live_usage['input_tokens'] += input_tokens
                     live_usage['output_tokens'] += output_tokens
-                    logger.debug(f"[USAGE] Iteration: +{input_tokens} input, +{output_tokens} output (total: {live_usage})")
+                    live_usage['cached_input_tokens'] += cached_input_tokens
+                    logger.debug(f"[USAGE] Iteration: +{input_tokens} input (+{cached_input_tokens} cached), "
+                                 f"+{output_tokens} output (total: {live_usage})")
 
                 async def stream_response():
                     nonlocal full_response, text_only_response, last_chunk
@@ -1070,8 +1019,14 @@ class ChatSession:
 
                         # Log usage information in all budget limits
                         execution_time = time.time() - start_time
-                        actual_cost = (actual_input_tokens * (self.model_info.input_token_price / 1_000_000) +
-                                      actual_output_tokens * (self.model_info.output_token_price / 1_000_000))
+                        cached_input_tokens = live_usage.get('cached_input_tokens', 0)
+                        non_cached_input = actual_input_tokens - cached_input_tokens
+                        cached_price = self.model_info.cached_input_token_price or self.model_info.input_token_price
+                        actual_cost = (
+                            non_cached_input * (self.model_info.input_token_price / 1_000_000) +
+                            cached_input_tokens * (cached_price / 1_000_000) +
+                            actual_output_tokens * (self.model_info.output_token_price / 1_000_000)
+                        )
                         for limit in self.budget_manager.limits.values():
                             await limit.log_usage_async(
                                 model_name=f"{self.config.provider}.{self.config.model}",
@@ -1079,9 +1034,11 @@ class ChatSession:
                                 tokens_output=actual_output_tokens,
                                 costs=actual_cost,
                                 duration_ms=execution_time * 1000,  # Convert to milliseconds
-                                user_id=self.user_id
+                                user_id=self.user_id,
+                                operation_type="normal_chat",
                             )
-                        logger.debug(f"[USAGE] Final: {actual_input_tokens} input, {actual_output_tokens} output, ${actual_cost:.6f}")
+                        logger.info("[OP] chat_async — done (user=%s, model=%s, in=%d (%d cached), out=%d, cost=%.6f€, %.0fms, streaming=True, pid=%d)",
+                                    self.user_id, _model, actual_input_tokens, cached_input_tokens, actual_output_tokens, actual_cost, execution_time * 1000, _pid)
 
                     # Extract any generated images from the response and add to history
                     generated_images = self._extract_generated_images(full_response)
@@ -1113,6 +1070,7 @@ class ChatSession:
                     )
 
                     # Log usage information in all budget limits
+                    # Non-streaming: no cached token breakdown available from ainvoke
                     execution_time = time.time() - start_time
                     actual_cost = (actual_input_tokens * (self.model_info.input_token_price / 1_000_000) +
                                   actual_output_tokens * (self.model_info.output_token_price / 1_000_000))
@@ -1123,9 +1081,11 @@ class ChatSession:
                             tokens_output=actual_output_tokens,
                             costs=actual_cost,
                             duration_ms=execution_time * 1000,  # Convert to milliseconds
-                            user_id=self.user_id
+                            user_id=self.user_id,
+                            operation_type="normal_chat",
                         )
-                    logger.debug(f"[USAGE] Final: {actual_input_tokens} input, {actual_output_tokens} output, ${actual_cost:.6f}")
+                    logger.info("[OP] chat_async — done (user=%s, model=%s, in=%d, out=%d, cost=%.6f€, %.0fms, streaming=False, pid=%d)",
+                                self.user_id, _model, actual_input_tokens, actual_output_tokens, actual_cost, execution_time * 1000, _pid)
 
                 self.add_message(Role.ASSISTANT, response_text)
 
@@ -1135,8 +1095,11 @@ class ChatSession:
                 return LlmAIMessage(content=response_text, response_metadata=response.response_metadata or {})
 
         except Exception as e:
+            _elapsed = (time.time() - start_time) * 1000
             if isinstance(e, InsufficientBudgetError):
+                logger.warning("[OP] chat_async — budget_exceeded (user=%s, model=%s, %.0fms, pid=%d)", self.user_id, _model, _elapsed, _pid)
                 raise
+            logger.error("[OP] chat_async — failed (user=%s, model=%s, %.0fms, pid=%d): %s", self.user_id, _model, _elapsed, _pid, type(e).__name__)
             raise RuntimeError(f"Error in async chat completion: {str(e)}")
 
     def copy_history_from(self, other: 'ChatSession') -> None:

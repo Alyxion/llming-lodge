@@ -1,5 +1,5 @@
 LLMing-Lodge
-Copyright (c) 2025 Michael Ikemann. All Rights Reserved.
+Copyright (c) 2026 Michael Ikemann. All Rights Reserved.
 
 Licensed under the Business Source License 1.1 (the "License");
 you may not use this file except in compliance with the License.
@@ -38,6 +38,43 @@ Material Icons
   Copyright Google LLC
   License: Apache-2.0
   https://github.com/google/material-design-icons
+
+Plotly.js v2.35.2
+  Interactive charting library
+  Copyright (c) 2012-2024, Plotly, Inc.
+  License: MIT
+  https://github.com/plotly/plotly.js
+
+SheetJS (xlsx.js)
+  Excel/spreadsheet file manipulation
+  Copyright (C) 2013-present SheetJS LLC
+  License: Apache-2.0
+  https://sheetjs.com
+
+PptxGenJS v4.0.1
+  PowerPoint (PPTX) generation library
+  Copyright (c) 2015-2025 Brent Ely
+  License: MIT
+  https://github.com/gitbrent/PptxGenJS
+  Bundles JSZip (MIT, (c) 2009-2016 Stuart Knightley et al.)
+
+Phosphor Icons
+  SVG icon library
+  Copyright (c) 2020 Phosphor Icons
+  License: MIT
+  https://github.com/phosphor-icons/core
+
+Tabler Icons
+  SVG icon library
+  Copyright (c) 2020-2024 Paweł Kuna
+  License: MIT
+  https://github.com/tabler/tabler-icons
+
+Noto Emoji
+  SVG emoji by Google
+  Copyright Google LLC
+  License: Apache-2.0
+  https://github.com/googlefonts/noto-emoji
 
 ---
 

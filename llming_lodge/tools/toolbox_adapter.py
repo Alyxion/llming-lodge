@@ -11,7 +11,7 @@ from .llm_tool import LlmTool
 from .llm_toolbox import LlmToolbox
 from .tool_definition import ToolDefinition, ToolSource
 from .tool_registry import ToolRegistry, get_default_registry
-from .builtin_tools import DALLE3_PRICING
+from .builtin_tools import IMAGE_GEN_PRICING
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +66,7 @@ class ToolboxAdapter:
                 continue
 
             # Check provider compatibility (for tools that are provider-specific)
-            if tool.requires_provider and tool.requires_provider != provider:
+            if not tool.is_available_for_provider(provider):
                 logger.debug(f"Tool '{name}' requires provider '{tool.requires_provider}', skipping for '{provider}'")
                 continue
 
@@ -115,7 +115,7 @@ class ToolboxAdapter:
                 logger.warning(f"Builtin tool '{tool.name}' has no callback")
                 return None
 
-        elif tool.source in (ToolSource.MCP_STDIO, ToolSource.MCP_HTTP, ToolSource.MCP_INPROCESS):
+        elif tool.source in (ToolSource.MCP_STDIO, ToolSource.MCP_HTTP, ToolSource.MCP_INPROCESS, ToolSource.MCP_BROWSER):
             return self._create_mcp_toolbox(tool, tool_config, cost_callback)
 
         else:
@@ -156,11 +156,11 @@ class ToolboxAdapter:
         tool_config: Dict[str, Any],
         cost_callback: Optional[Callable[[str, float], None]] = None,
     ) -> Optional[LlmToolbox]:
-        """Create toolbox for DALL-E image generation.
+        """Create toolbox for GPT Image generation.
 
         Supports tool_config options:
-        - size: Default size (1024x1024, 1792x1024, 1024x1792)
-        - quality: Default quality (standard, hd)
+        - size: Default size (1024x1024, 1536x1024, 1024x1536)
+        - quality: Default quality (low, medium, high)
         - allowed_sizes: List of allowed sizes (restricts what model can request)
         - allowed_qualities: List of allowed qualities
         """
@@ -168,9 +168,12 @@ class ToolboxAdapter:
             logger.warning("Image generation requires OpenAI client")
             return None
 
+        import os
+        image_model = os.environ.get("DALLE_DEPLOYMENT_NAME", "gpt-image-1")
+
         # Get config options with defaults
         default_size = tool_config.get("size", "1024x1024")
-        default_quality = tool_config.get("quality", "standard")
+        default_quality = tool_config.get("quality", "medium")
         allowed_sizes = tool_config.get("allowed_sizes")
         allowed_qualities = tool_config.get("allowed_qualities")
 
@@ -179,7 +182,7 @@ class ToolboxAdapter:
             size: str = default_size,
             quality: str = default_quality
         ) -> str:
-            """Generate an image using DALL-E 3."""
+            """Generate an image using GPT Image."""
             # Enforce allowed sizes if configured
             if allowed_sizes and size not in allowed_sizes:
                 logger.warning(f"Size '{size}' not allowed, using '{default_size}'")
@@ -192,20 +195,20 @@ class ToolboxAdapter:
 
             # Calculate cost
             cost_key = (size, quality)
-            cost_usd = DALLE3_PRICING.get(cost_key, 0.080)
-            logger.debug(f"[DALLE] Generating image: size={size}, quality={quality}, cost=${cost_usd:.3f}")
+            cost_usd = IMAGE_GEN_PRICING.get(cost_key, 0.042)
+            logger.debug(f"[IMAGE_GEN] Generating image: model={image_model}, size={size}, quality={quality}, cost=${cost_usd:.3f}")
 
             result = openai_client.generate_image_sync(
                 prompt=prompt,
                 size=size,
                 quality=quality,
-                model="dall-e-3"
+                model=image_model,
             )
 
             # Log the cost
             if cost_callback:
                 cost_callback("generate_image", cost_usd)
-                logger.debug(f"[DALLE] Cost logged: ${cost_usd:.3f}")
+                logger.debug(f"[IMAGE_GEN] Cost logged: ${cost_usd:.3f}")
 
             return result
 
@@ -220,12 +223,12 @@ class ToolboxAdapter:
                 },
                 "size": {
                     "type": "string",
-                    "enum": allowed_sizes or ["1024x1024", "1792x1024", "1024x1792"],
+                    "enum": allowed_sizes or ["1024x1024", "1536x1024", "1024x1536"],
                     "description": f"Image size. Default: {default_size}",
                 },
                 "quality": {
                     "type": "string",
-                    "enum": allowed_qualities or ["standard", "hd"],
+                    "enum": allowed_qualities or ["low", "medium", "high"],
                     "description": f"Image quality. Default: {default_quality}",
                 }
             },

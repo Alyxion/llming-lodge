@@ -42,6 +42,7 @@ from .mistral.mistral_provider import MistralProvider  # noqa: E402
 from .google.google_provider import GoogleProvider  # noqa: E402
 from .together.together_provider import TogetherProvider  # noqa: E402
 from .generic_openai_provider import GenericOpenAIProvider  # noqa: E402
+from .azure_openai.azure_openai_provider import AzureOpenAIProvider  # noqa: E402
 
 
 __all__ = [
@@ -55,4 +56,5 @@ __all__ = [
     'GoogleProvider',
     'TogetherProvider',
     'GenericOpenAIProvider',
+    'AzureOpenAIProvider',
 ]

@@ -30,7 +30,7 @@ OPENAI_MODELS = [
         reasoning=True,
         default_reasoning_effort=ReasoningEffort.LOW,
         enforced_temperature=1.0,
-        default_tools=["web_search", "generate_image"],
+        default_tools=["web_search"],
         native_tools={"web_search": {"type": "web_search"}},
     ),
     # --- GPT-5 Mini/Nano (August 2025) ---
@@ -58,7 +58,7 @@ OPENAI_MODELS = [
         reasoning=True,
         default_reasoning_effort=ReasoningEffort.MINIMAL,
         enforced_temperature=1.0,
-        default_tools=["web_search", "generate_image"],
+        default_tools=["web_search"],
         native_tools={"web_search": {"type": "web_search"}},
     ),
     LLMInfo(
@@ -84,7 +84,7 @@ OPENAI_MODELS = [
         reasoning=True,
         default_reasoning_effort=ReasoningEffort.NONE,
         enforced_temperature=1.0,
-        default_tools=[],
+        default_tools=["web_search"],
         native_tools={"web_search": {"type": "web_search"}},
     ),
 ]
