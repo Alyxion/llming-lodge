@@ -22,7 +22,9 @@
 }
 
 .cv2-chat-wrapper.cv2-initial-mode .cv2-input-area {
+  position: static;
   padding-top: 36px;
+  background: none;
   transition: none;
 }
 
@@ -51,7 +53,7 @@
 }
 
 .cv2-mascot {
-  height: 110px;
+  height: clamp(110px, 18vh, 138px);
   width: auto;
   flex-shrink: 0;
 }

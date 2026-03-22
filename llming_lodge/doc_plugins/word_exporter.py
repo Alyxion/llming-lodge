@@ -72,22 +72,26 @@ def _add_rich_text(paragraph, html: str) -> None:
         run.underline = underline
 
 
-def export_docx(spec: dict) -> bytes:
+def export_docx(spec: dict, chart_images: dict | None = None) -> bytes:
     """Generate DOCX from a Word document spec.
 
     Args:
         spec: Word document spec with ``sections`` list. Each section has:
-            - ``type``: 'heading', 'paragraph', 'list', 'table'
+            - ``type``: 'heading', 'paragraph', 'list', 'table', 'image', 'chart'
             - ``content``: HTML string (for heading/paragraph)
             - ``level``: int (for heading, 1-6)
             - ``items``: list of strings (for list)
             - ``ordered``: bool (for list)
             - ``headers``: list of strings (for table)
             - ``rows``: list of list of strings (for table)
+            - ``_chartImageId``: str (for chart — key into *chart_images*)
+        chart_images: Optional dict mapping chart IDs to base64 PNG data
+            (data URI or raw base64). Used to embed pre-rendered Plotly charts.
 
     Returns:
         DOCX file content as bytes.
     """
+    chart_images = chart_images or {}
     doc = Document()
 
     # Set default font
@@ -175,6 +179,21 @@ def export_docx(spec: dict) -> bytes:
                     img_bytes = _b64.b64decode(b64_part)
                     img_stream = io.BytesIO(img_bytes)
                     doc.add_picture(img_stream, width=Inches(6.0))
+
+        elif sec_type == "chart":
+            # Embedded chart — look up pre-rendered PNG from chart_images
+            chart_id = section.get("_chartImageId", "")
+            img_data = chart_images.get(chart_id, "")
+            if img_data:
+                import base64 as _b64
+                if img_data.startswith("data:"):
+                    img_data = img_data.split(",", 1)[1]
+                try:
+                    img_bytes = _b64.b64decode(img_data)
+                    img_stream = io.BytesIO(img_bytes)
+                    doc.add_picture(img_stream, width=Inches(6.0))
+                except Exception as e:
+                    logger.warning(f"[WORD_EXPORT] Failed to add chart image: {e}")
 
         else:
             # Unknown section type — treat as paragraph

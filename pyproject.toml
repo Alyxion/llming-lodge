@@ -39,6 +39,9 @@ fastapi = "*"
 starlette = "*"
 uvicorn = "*"
 
+# Communication layer (shared with hub)
+llming-com = {path = "../llming-com", develop = true}
+
 # Document processing
 pdfplumber = ">=0.11"
 pypdfium2 = ">=4.0"

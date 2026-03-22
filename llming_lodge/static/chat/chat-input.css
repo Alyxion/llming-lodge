@@ -100,8 +100,12 @@
 /* ── Input Area ───────────────────────────────────── */
 
 .cv2-input-area {
-  padding: 8px 0 16px;
+  position: sticky;
+  bottom: 0;
+  z-index: 5;
+  padding-top: 48px;
   flex-shrink: 0;
+  background: linear-gradient(to bottom, transparent 0%, transparent 30%, var(--chat-bg-end, var(--chat-bg)) 100%);
 }
 
 .cv2-input-wrapper {
@@ -113,9 +117,14 @@
   box-shadow: 0 1px 4px rgba(0,0,0,0.04);
 }
 
+.cv2-input-wrapper:hover {
+  border-color: rgba(80, 200, 240, 0.45);
+  box-shadow: 0 0 6px rgba(80, 200, 240, 0.12);
+}
+
 .cv2-input-wrapper:focus-within {
-  border-color: var(--chat-accent);
-  box-shadow: 0 0 0 3px rgba(var(--chat-accent-rgb), 0.12);
+  border-color: rgba(80, 200, 240, 0.6);
+  box-shadow: 0 0 10px rgba(80, 200, 240, 0.2);
 }
 
 .cv2-input-wrapper.cv2-drag-active {
@@ -327,7 +336,12 @@
   min-width: 240px;
   max-height: 400px;
   overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--chat-scrollbar-thumb, rgba(0,0,0,0.15)) transparent;
 }
+.cv2-tool-submenu::-webkit-scrollbar { width: 5px; }
+.cv2-tool-submenu::-webkit-scrollbar-track { background: transparent; }
+.cv2-tool-submenu::-webkit-scrollbar-thumb { background: var(--chat-scrollbar-thumb, rgba(0,0,0,0.15)); border-radius: 4px; }
 
 /* ── Flyout submenus (Documents, etc.) ──────────── */
 
@@ -350,9 +364,23 @@
   max-height: 400px;
   overflow-y: auto;
   z-index: 210;
+  scrollbar-width: thin;
+  scrollbar-color: var(--chat-scrollbar-thumb, rgba(0,0,0,0.15)) transparent;
+}
+.cv2-flyout-menu::-webkit-scrollbar { width: 5px; }
+.cv2-flyout-menu::-webkit-scrollbar-track { background: transparent; }
+.cv2-flyout-menu::-webkit-scrollbar-thumb { background: var(--chat-scrollbar-thumb, rgba(0,0,0,0.15)); border-radius: 4px; }
+
+/* Nested flyouts (e.g. Office 365) use fixed positioning to escape parent overflow clip */
+.cv2-flyout-menu.cv2-nested-flyout {
+  position: fixed;
+  left: auto;
+  bottom: auto;
+  z-index: 220;
 }
 
 .cv2-flyout-menu.cv2-visible { display: block; }
+.cv2-flyout-menu.cv2-visible[style*="position: fixed"] { z-index: 300; }
 
 .cv2-tool-item {
   display: flex;
@@ -664,26 +692,25 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    width: 72px;
-    height: 72px;
+    width: 56px;
+    height: 56px;
     border-radius: 50%;
     background: #ef4444;
     color: #fff;
     border: none;
     cursor: pointer;
     position: fixed;
-    bottom: 32px;
-    left: 50%;
-    transform: translateX(-50%);
+    bottom: 16px;
+    right: 78px;
     z-index: 10001;
     box-shadow: 0 4px 24px rgba(239, 68, 68, 0.4);
     transition: transform 0.15s, box-shadow 0.15s;
   }
   .cv2-voice-active-mobile .cv2-mobile-mic-btn:active {
-    transform: translateX(-50%) scale(0.93);
+    transform: scale(0.93);
   }
   .cv2-voice-active-mobile .cv2-mobile-mic-btn .material-icons {
-    font-size: 32px;
+    font-size: 26px;
   }
   /* Pulse when recording */
   .cv2-voice-active-mobile .cv2-mobile-mic-btn.cv2-recording {
@@ -693,6 +720,8 @@
     0%, 100% { box-shadow: 0 4px 24px rgba(239, 68, 68, 0.4); }
     50% { box-shadow: 0 4px 40px rgba(239, 68, 68, 0.7); }
   }
+  /* Hide mic button when AI is responding */
+  .cv2-voice-active-mobile.cv2-speech-responding .cv2-mobile-mic-btn { display: none !important; }
   /* Larger textarea on mobile */
   .cv2-textarea {
     font-size: 16px;

@@ -99,5 +99,21 @@
   "ai.custom_prompt": "Custom Prompt…",
   "ai.thinking": "AI is thinking…",
   "ai.cancel": "Cancel",
-  "ai.enter_instruction": "Enter your instruction:"
+  "ai.enter_instruction": "Enter your instruction:",
+  "celebration.holi": [{"text": "Happy Holi, {name}! 🎨🌈"}],
+  "celebration.diwali": [{"text": "Happy Diwali, {name}! 🪔✨"}],
+  "celebration.chinese_new_year": [{"text": "Happy Lunar New Year, {name}! 🧧🐉"}],
+  "celebration.eid_al_fitr": [{"text": "Eid Mubarak, {name}! 🌙✨"}],
+  "celebration.eid_al_adha": [{"text": "Eid Mubarak, {name}! 🌙✨"}],
+  "celebration.rosh_hashanah": [{"text": "Shanah Tovah, {name}! 🍎🍯"}],
+  "celebration.hanukkah": [{"text": "Happy Hanukkah, {name}! 🕎✨"}],
+  "celebration.christmas": [{"text": "Merry Christmas, {name}! 🎄"}],
+  "celebration.easter": [{"text": "Happy Easter, {name}! 🐣"}],
+  "celebration.carnival": [{"text": "Happy Mardi Gras, {name}! 🎭🎉"}],
+  "celebration.new_year": [{"text": "Happy New Year, {name}! 🎆"}],
+  "celebration.halloween": [{"text": "Happy Halloween, {name}! 🎃👻"}],
+  "celebration.valentines_day": [{"text": "Happy Valentine's Day, {name}! 💕"}],
+  "celebration.womens_day": [{"text": "Happy International Women's Day, {name}! 💐"}],
+  "celebration.thanksgiving_us": [{"text": "Happy Thanksgiving, {name}! 🦃🍂"}],
+  "celebration.st_patricks_day": [{"text": "Happy St. Patrick's Day, {name}! ☘️"}]
 }

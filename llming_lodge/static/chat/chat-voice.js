@@ -673,9 +673,10 @@
       bar.classList.remove('cv2-ivb-speech', 'cv2-ivb-realtime',
         'cv2-speech-idle', 'cv2-speech-recording', 'cv2-speech-processing', 'cv2-speech-responding');
 
-      // Mobile: remove voice-active class
+      // Mobile: remove voice-active + phase classes
       const chatRoot = document.getElementById('chat-app');
-      if (chatRoot) chatRoot.classList.remove('cv2-voice-active-mobile');
+      if (chatRoot) chatRoot.classList.remove('cv2-voice-active-mobile',
+        'cv2-speech-idle', 'cv2-speech-recording', 'cv2-speech-processing', 'cv2-speech-responding');
       if (this.el.mobileMicBtn) this.el.mobileMicBtn.classList.remove('cv2-recording');
     },
 
@@ -763,6 +764,9 @@
     _interruptSpeechMode() {
       this._stopTTSPlayback();
       this._hideVoiceThinking();
+      // Immediately switch to idle so UI updates (hide interrupt, show mic)
+      this._setSpeechPhase('idle');
+      this.el.voiceNote.textContent = this.t('chat.voice_ptt_ready');
       if (this.streaming) {
         this.ws.send({ type: 'stop_streaming' });
         // handleResponseCancelled will call _speechModeNextCycle
@@ -779,6 +783,12 @@
         bar.classList.remove(...phases);
         if (phase) bar.classList.add(`cv2-speech-${phase}`);
       }
+      // Apply to #chat-app so CSS can target mobile mic visibility by phase
+      const chatRoot = document.getElementById('chat-app');
+      if (chatRoot) {
+        chatRoot.classList.remove(...phases);
+        if (phase) chatRoot.classList.add(`cv2-speech-${phase}`);
+      }
       // Also apply to legacy popup elements (backward compat)
       const el = this.el.voiceModeActive;
       if (el) {
@@ -791,6 +801,14 @@
         if (phase) card.classList.add(`cv2-speech-${phase}`);
       }
       this._updateVoiceAvatar(phase);
+      // Clear waveform canvas when idle (no stale waveform visible)
+      if (phase === 'idle') {
+        const canvas = this.el.voiceWave;
+        if (canvas) {
+          const ctx = canvas.getContext('2d');
+          if (ctx) ctx.clearRect(0, 0, canvas.width, canvas.height);
+        }
+      }
     },
 
     _updateVoiceAvatar(phase) {

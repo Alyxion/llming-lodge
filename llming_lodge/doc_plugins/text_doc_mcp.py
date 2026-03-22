@@ -4,7 +4,7 @@ import json
 import logging
 from typing import Any, Dict, List
 
-from llming_lodge.tools.mcp import InProcessMCPServer
+from llming_models.tools.mcp import InProcessMCPServer
 from llming_lodge.doc_plugins.document_store import DocumentSessionStore
 
 logger = logging.getLogger(__name__)
@@ -105,9 +105,10 @@ class TextDocMCP(InProcessMCPServer):
                 "displayDescription": "Add a new section to the document",
                 "icon": "add_circle",
                 "description": (
-                    "Add a new section to a text document. Specify the type "
-                    "(heading, paragraph, list, table) and content. Optionally "
-                    "provide a position to insert at and a level for headings."
+                    "Add a new section to a text document. "
+                    "Types: heading, paragraph, list, table, embed. "
+                    "To include a chart or table from the conversation, use type='embed' "
+                    "with ref=<document_id>. Do NOT copy/fetch the data — just reference it."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -118,13 +119,24 @@ class TextDocMCP(InProcessMCPServer):
                         },
                         "type": {
                             "type": "string",
-                            "enum": ["heading", "paragraph", "list", "table"],
-                            "description": "Section type",
+                            "enum": ["heading", "paragraph", "list", "table", "embed"],
+                            "description": (
+                                "Section type. Use 'embed' to reference another "
+                                "document (chart, table, etc.) by its ID."
+                            ),
                         },
                         "content": {
                             "description": (
                                 "Section content. String for heading/paragraph, "
-                                "array of strings for list, array of arrays for table."
+                                "array of strings for list, array of arrays for table. "
+                                "Not needed for embed (use $ref instead)."
+                            ),
+                        },
+                        "ref": {
+                            "type": "string",
+                            "description": (
+                                "Document ID to embed (for type 'embed'). "
+                                "References any earlier document in the conversation."
                             ),
                         },
                         "position": {
@@ -136,7 +148,7 @@ class TextDocMCP(InProcessMCPServer):
                             "description": "Heading level (1-6), only used for type 'heading'",
                         },
                     },
-                    "required": ["document_id", "type", "content"],
+                    "required": ["document_id", "type"],
                 },
             },
             {
@@ -225,6 +237,9 @@ class TextDocMCP(InProcessMCPServer):
 
     def _section_preview(self, section: Dict) -> str:
         """Generate a short preview of a section's content."""
+        if section.get("type") == "embed":
+            ref = section.get("$ref", "")
+            return f"[embed: {ref[:12]}...]" if len(ref) > 12 else f"[embed: {ref}]"
         content = section.get("content", "")
         if isinstance(content, list):
             if content and isinstance(content[0], list):
@@ -312,11 +327,18 @@ class TextDocMCP(InProcessMCPServer):
                 data["sections"] = []
             sections = data["sections"]
             from uuid import uuid4
+            sec_type = arguments["type"]
             new_section: Dict[str, Any] = {
                 "id": uuid4().hex[:8],
-                "type": arguments["type"],
-                "content": arguments["content"],
+                "type": sec_type,
             }
+            if sec_type == "embed":
+                ref = arguments.get("ref", "") or arguments.get("$ref", "")
+                if not ref:
+                    return json.dumps({"error": "embed sections require a 'ref' field"})
+                new_section["$ref"] = ref
+            else:
+                new_section["content"] = arguments.get("content", "")
             if arguments.get("level") is not None:
                 new_section["level"] = arguments["level"]
             position = arguments.get("position")

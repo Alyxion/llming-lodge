@@ -14,6 +14,51 @@
       }
       this.idb.putDocument(doc).catch(() => {});
       this._renderDocList();
+      // If the doc was created via tool call during streaming and there's no
+      // inline block for it yet, inject one into the current assistant message.
+      this._injectToolDocBlock(doc);
+    },
+
+    /**
+     * Inject a doc block into the current assistant message when the LLM used
+     * create_document (tool) instead of a fenced code block.
+     */
+    _injectToolDocBlock(doc) {
+      if (!doc || !doc.type || !doc.data) return;
+      // Only inject for types the plugin registry can render
+      if (!this.docPlugins || !this.docPlugins.has(doc.type)) return;
+      // Skip if an inline block already exists for this doc id
+      if (this.inlineDocBlocks?.find(b => b.id === doc.id)) return;
+
+      // Find the latest assistant bubble
+      const bubbles = document.querySelectorAll('.cv2-msg-assistant');
+      const bubble = bubbles.length ? bubbles[bubbles.length - 1] : null;
+      if (!bubble) return;
+      let contentEl = bubble.querySelector('.cv2-msg-content');
+      if (!contentEl) {
+        // Tool doc arrives before text streaming starts — create content div
+        contentEl = document.createElement('div');
+        contentEl.className = 'cv2-msg-content';
+        bubble.appendChild(contentEl);
+      }
+
+      // Build the block
+      const blockId = `dp-tool-${doc.id}-${Date.now()}`;
+      const container = document.createElement('div');
+      container.className = 'cv2-doc-plugin-block';
+      container.dataset.blockId = blockId;
+      container.dataset.lang = doc.type;
+      contentEl.appendChild(container);
+
+      // Build the full spec (id + name + data)
+      const spec = { id: doc.id, name: doc.name };
+      if (typeof doc.data === 'object') Object.assign(spec, doc.data);
+      const raw = JSON.stringify(spec);
+
+      // Render the plugin into the container
+      this.docPlugins.render(doc.type, container, raw, blockId).catch(err => {
+        console.error('[DOC] Failed to inject tool doc block:', err);
+      });
     },
 
     handleDocUpdated(msg) {

@@ -405,7 +405,7 @@ class HeartbeatMonitor:
 
         # ── Environment (filtered — only safe keys) ──
         safe_prefixes = (
-            "NICEGUI_", "DEBUG_", "LLMING_", "LAI_", "WEBSITE_",
+            "NICEGUI_", "DEBUG_", "LLMING_", "WEBSITE_",
             "PORT", "PYTHON", "PATH", "HOME", "USER", "LANG",
         )
         env_filtered = {}

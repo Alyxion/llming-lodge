@@ -29,6 +29,7 @@
       this.activeConvId = data.id;
       this._activeProjectId = data.project_id || null;
       this._activeNudgeId = data.nudge_id || null;
+      this._autoUnderlyingModel = data.auto_underlying_model || '';
       this._renderSidebar();
       if (!this.chatVisible) this.showChat();
       this._blockDataStore?.clear();
@@ -128,10 +129,11 @@
         id: c.id,
         title: c.title || c.first_user_snippet?.substring(0, 30) || this.t('chat.untitled'),
         created_at: c.created_at,
+        updated_at: c.updated_at,
         project_id: c.project_id || null,
         nudge_id: c.nudge_id || null,
         favorited: c.favorited || false,
-      })).sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
+      })).sort((a, b) => (b.updated_at || b.created_at || '').localeCompare(a.updated_at || a.created_at || ''));
 
       this._renderSidebar();
     } catch (err) {
@@ -183,9 +185,7 @@
       let html = '';
       if (favs.length > 0) {
         html = favs.map(d => {
-          const iconHtml = d.icon
-            ? `<img src="${d.icon}" class="cv2-nudge-inline-icon" alt="">`
-            : '<span class="material-icons cv2-nudge-inline-icon-default">science</span>';
+          const iconHtml = this._renderIcon(d.icon, d.icon && this._isIconUrl(d.icon) ? 'cv2-nudge-inline-icon' : 'cv2-nudge-inline-icon-default', 'science');
           return `
             <div class="cv2-nudge-inline" data-nudge-uid="${this._escAttr(d.uid)}">
               ${iconHtml}
@@ -242,9 +242,7 @@
     let html = '';
     for (const proj of items) {
       const isActive = this._activeProjectId === proj.id && this._activeView === 'project';
-      const iconHtml = proj.icon
-        ? `<img src="${proj.icon}" class="cv2-project-icon" alt="">`
-        : '<span class="material-icons cv2-project-icon-default">folder</span>';
+      const iconHtml = this._renderIcon(proj.icon, proj.icon && this._isIconUrl(proj.icon) ? 'cv2-project-icon' : 'cv2-project-icon-default', 'folder');
 
       html += `
         <div class="cv2-project-item ${isActive ? 'cv2-project-active' : ''}" data-project-id="${this._escAttr(proj.id)}">
@@ -397,8 +395,16 @@
 
   async _selectConversation(id) {
     if (id === this.activeConvId) return;
+    // Cancel any in-flight streaming before switching
+    if (this.streaming) {
+      this.ws.send({ type: 'stop_streaming' });
+      this.streaming = false;
+      this._updateSendButton();
+    }
     // On mobile, close sidebar after selecting a conversation
     if (this._closeSidebarOnMobile) this._closeSidebarOnMobile();
+    // Exit incognito mode when switching away (session is discarded — never persisted)
+    if (this.incognito) this._exitIncognito();
     // Save draft for the conversation we're leaving
     if (this.el.textarea.value.trim()) this._saveDraft();
     this.activeConvId = id;
@@ -418,6 +424,7 @@
     // Track project/nudge context from loaded conversation
     this._activeProjectId = data?.project_id || null;
     this._activeNudgeId = data?.nudge_id || null;
+    this._autoUnderlyingModel = data?.auto_underlying_model || '';
     this._renderSidebar();
     if (data) {
       const hasNudgeStore = this.config.nudgeCategories && this.config.nudgeCategories.length > 0;

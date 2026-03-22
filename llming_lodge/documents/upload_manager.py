@@ -102,6 +102,29 @@ class UploadManager:
         logger.info(f"[UPLOAD] Stored {safe_name} ({len(content)} bytes) as {file_id}")
         return attachment
 
+    async def store_extracted(self, filename: str, text: str, mime_type: str, user_id: str) -> FileAttachment:
+        """Store a large file as text-only (no raw_data kept in memory).
+
+        Used as fallback when a PDF/DOCX exceeds the normal size limit
+        but its text can be extracted within token boundaries.
+        """
+        if user_id != self.user_id:
+            raise PermissionError("User ID mismatch")
+        file_id = uuid.uuid4().hex[:12]
+        safe_name = Path(filename).name
+        attachment = FileAttachment(
+            name=safe_name,
+            size=len(text.encode()),
+            mime_type=mime_type,
+            file_id=file_id,
+            raw_data=None,
+            text_content=text,
+        )
+        self.files.append(attachment)
+        logger.info("[UPLOAD] Stored extracted text for %s (%d chars) as %s",
+                    safe_name, len(text), file_id)
+        return attachment
+
     def remove_file(self, file_id: str, user_id: str) -> None:
         if user_id != self.user_id:
             raise PermissionError("User ID mismatch")

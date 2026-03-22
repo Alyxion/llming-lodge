@@ -15,6 +15,13 @@ from pydantic.alias_generators import to_camel
 from llming_lodge.constants import DEFAULT_LANGUAGES as _DEFAULT_LANGUAGES
 
 
+# ── Permission constants ────────────────────────────────────────────
+# Pass these in ChatUserConfig.permissions to grant capabilities.
+PERM_NUDGE_ADMIN = "nudge_admin"      # edit/publish/unpublish any nudge, see master nudges, transfer ownership
+PERM_DEV_TOOLS = "dev_tools"          # /dev commands, shift+click gear, API keys dialog, prompt inspector
+PERM_HUB_ADMIN = "hub_admin"          # admin link in hub header
+
+
 class QuickAction(BaseModel):
     """A suggestion card shown on the empty-chat welcome screen."""
     id: str
@@ -100,6 +107,7 @@ class NudgeModel(BaseModel):
     capabilities: list[Any] = Field(default_factory=list)
     files: list[NudgeFile] = Field(default_factory=list)
     doc_plugins: list[str] | None = None  # enabled doc plugin types; None = all, [] = none
+    translations: dict[str, Any] = Field(default_factory=dict)  # {"de-de": {"name": "...", "description": "...", "suggestions": [...]}}
     updated_at: str = ""
     created_at: str = ""
 
@@ -132,7 +140,7 @@ class PresentationTemplate(BaseModel):
     """A branded presentation template (colors, fonts, logo) for slide decks."""
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
     name: str                          # unique key, e.g. "corporate"
-    label: str                         # display name, e.g. "Corporate Default"
+    label: str                         # display name, e.g. "Corporate Template"
     accent_color: str = ""             # hex, e.g. "#003366" — overrides --chat-accent
     title_color: str = ""              # title text color
     text_color: str = ""               # body text color
@@ -156,6 +164,7 @@ class ChatAppConfig(BaseModel):
     app_logo_link: str = ""
     app_title: str = ""
     app_mascot: str = ""
+    app_mascot_incognito: str = ""  # mascot image shown in incognito mode (optional)
     show_budget: bool = False
     nudge_section_icon: str = "icons/phosphor/regular/drop.svg"
     nudge_categories: list[NudgeCategory] = Field(default_factory=list)
@@ -172,6 +181,8 @@ class ChatAppConfig(BaseModel):
     max_file_size: int = 20 * 1024 * 1024  # max size per uploaded file (bytes)
     max_session_size: int = 10 * 1024 * 1024  # max total file size per conversation (bytes)
     supported_languages: list[dict] = Field(default_factory=lambda: list(_DEFAULT_LANGUAGES))  # override to customize
+    system_nudges: list[str] | None = None  # enabled system nudge keys (None = all registered, [] = none)
+    bolt_label: str = "Bolts"  # UI label for bolts (host app can rename, e.g. "Jets")
 
 
 class ChatUserConfig(BaseModel):
@@ -196,11 +207,11 @@ class ChatUserConfig(BaseModel):
     on_action_callback: Any = None  # async callback(action_id, text) → {notification?, ...}
     tool_toggle_notifications: dict[str, str] = Field(default_factory=dict)  # tool_name → message shown when enabled
     banner_html: str = ""  # optional HTML banner shown below the chat input
-    translation_overrides: dict[str, str] = Field(default_factory=dict)  # key → value overrides merged on top of locale translations
+    translation_overrides: dict[str, Any] = Field(default_factory=dict)  # key → value overrides merged on top of locale translations
     user_teams: list[dict] = Field(default_factory=list)  # [{team_id, name, icon, role}, ...] for nudge ACL
     doc_plugins: list[str] | None = None  # enabled doc plugin types; None = all, [] = none
     enforced_theme: str = ""  # if set, forces this theme (e.g. "joche") and ignores localStorage
-    is_admin: bool = False  # True if user is a team owner/admin (sees master nudges, etc.)
+    permissions: set[str] = Field(default_factory=set)  # Set of PERM_* constants (e.g. {PERM_NUDGE_ADMIN, PERM_DEV_TOOLS})
     presentation_templates: list[PresentationTemplate] = Field(default_factory=list)
     directory_service: Any = None  # DirectoryService instance (people search)
     email_service: Any = None  # EmailService instance (draft / send)
@@ -209,8 +220,10 @@ class ChatUserConfig(BaseModel):
     bg_logo_svg: str = ""  # optional inline SVG content for brand watermark in background (rendered inside the bg SVG viewBox 1200x800)
     prefetched_master_nudges: list[dict] | None = None  # pre-fetched master nudges (skip MongoDB in render)
     prefetched_discoverable_nudges: list[dict] | None = None  # pre-fetched discoverable nudges (skip MongoDB in render)
+    budget_limits_for_user: Any = None  # (email: str) -> list[BudgetLimit] — create budget limits for another user (admin /dev budget command)
     on_message_intercept: Any = None  # async (text, controller) -> str|None — intercept before LLM
     on_new_chat: Any = None  # async (controller) -> None — cleanup on new chat
+    app_extensions: list[Any] = Field(default_factory=list)  # list of AppExtension instances (lazy-loaded on demand)
 
 
 class TeamInfo(BaseModel):
@@ -239,6 +252,7 @@ class ChatFrontendConfig(BaseModel):
     app_logo_link: str = ""
     app_title: str = ""
     app_mascot: str = ""
+    app_mascot_incognito: str = ""
     theme: ThemeConfig | None = None
     locale: str = "en-us"
     fake_time: str = ""
@@ -248,12 +262,15 @@ class ChatFrontendConfig(BaseModel):
     enable_voice_input: bool = True
     enable_live_voice: bool = True
     translations: dict[str, Any] = Field(default_factory=dict)
+    supported_languages: list[dict] = Field(default_factory=list)  # [{code, label, flag}, ...] for i18n flag bar
     nudge_categories: list[dict] = Field(default_factory=list)
     visibility_groups: list[dict] = Field(default_factory=list)
     teams: list[dict] = Field(default_factory=list)
     doc_plugins: list[str] = Field(default_factory=list)  # enabled doc plugin types for frontend
     presentation_templates: list[dict] = Field(default_factory=list)
     enforced_theme: str = ""  # if set, forces this theme and ignores localStorage
-    is_admin: bool = False  # True if user is a nudge admin (can create/see master nudges)
+    permissions: list[str] = Field(default_factory=list)  # PERM_* constants for frontend capability checks
     bg_logo_svg: str = ""  # optional inline SVG content for brand watermark in bg
     email_signature: str = ""  # HTML email signature for toolbar insertion
+    bolt_label: str = "Bolts"  # UI label for bolts (host app can rename, e.g. "Jets")
+    app_extensions: list[dict] = Field(default_factory=list)  # [{name, label, icon, scriptUrl}] — available extensions (loaded on demand)

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Base ChatController with all business logic for chat operations.
 
-Views (NiceGUI, Terminal) subclass this and implement abstract hooks
+Subclasses (WebSocketChatController, etc.) implement abstract hooks
 for view-specific rendering.
 """
 
@@ -11,14 +11,14 @@ import re
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
 
-from llming_lodge import ChatSession, ChatHistory, LLMConfig, LLMManager
-from llming_lodge.budget import MemoryBudgetLimit, LimitPeriod, BudgetHandler
-from llming_lodge.budget.budget_limit import BudgetLimit
-from llming_lodge.budget.budget_manager import LLMBudgetManager
-from llming_lodge.llm_base_models import Role, ChatMessage
-from llming_lodge.tools.tool_call import ToolCallInfo, ToolCallStatus
-from llming_lodge.tools.tool_definition import MCPServerConfig, PROVIDER_COMPAT, ToolDefinition, ToolSource
-from llming_lodge.tools.tool_registry import get_default_registry
+from llming_models import ChatSession, ChatHistory, LLMConfig, LLMManager
+from llming_models.budget import MemoryBudgetLimit, LimitPeriod, BudgetHandler
+from llming_models.budget.budget_limit import BudgetLimit
+from llming_models.budget.budget_manager import LLMBudgetManager
+from llming_models.llm_base_models import Role, ChatMessage
+from llming_models.tools.tool_call import ToolCallInfo, ToolCallStatus
+from llming_models.tools.tool_definition import MCPServerConfig, PROVIDER_COMPAT, ToolDefinition, ToolSource
+from llming_models.tools.tool_registry import get_default_registry
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +57,7 @@ class ChatController(ABC):
                 system prompt at API call time (e.g. user identity). Not visible
                 in the editable prompt.
             mcp_servers: Optional MCP server configurations
-            initial_model: Optional initial model (default: gpt-5.2)
+            initial_model: Optional initial model (default: category "large")
             user_avatar: Optional URL to the user's avatar image
             budget_handler: Optional callback returning current BudgetInfo
         """
@@ -66,20 +66,36 @@ class ChatController(ABC):
         self.user_avatar = user_avatar or ""
         self.budget_handler = budget_handler
         self.mcp_servers = mcp_servers or []
+        self._message_tool_calls: dict[int, list[dict]] = {}
 
         # Get available models
         available_llms = list(llm_manager.get_available_llms())
         if not available_llms:
             raise ValueError("No LLM models available")
 
-        # Set default model
-        if initial_model:
-            self.model = initial_model
-        else:
+        # Set default model — @auto enables intelligent auto-selection
+        if initial_model == "@auto" or (not initial_model):
+            # Default to auto-select: start on Sonnet, upgrade to Opus when needed
+            default_medium = llm_manager.get_default_model("medium")
             self.model = next(
-                (info.model for info in available_llms if info.model == "gpt-5.2"),
+                (info.model for info in available_llms if info.name == default_medium or info.model == default_medium),
                 available_llms[0].model
             )
+            self._auto_select = True
+            self._auto_select_base_model = self.model
+            logger.info("[AUTO-SELECT] Default enabled — starting on %s", self.model)
+        elif initial_model:
+            self.model = initial_model
+            self._auto_select = False
+            self._auto_select_base_model = ""
+        else:
+            default_large = llm_manager.get_default_model("large")
+            self.model = next(
+                (info.model for info in available_llms if info.name == default_large or info.model == default_large),
+                available_llms[0].model
+            )
+            self._auto_select = False
+            self._auto_select_base_model = ""
 
         # Get model info and config
         model_info = llm_manager.get_model_info(self.model)
@@ -97,6 +113,8 @@ class ChatController(ABC):
         # Tool settings
         self.available_tools = self._get_available_tools_for_provider(self.provider)
         self.enabled_tools = list(getattr(model_info, 'default_tools', self.available_tools))
+        if "web_search" not in self.enabled_tools:
+            self.enabled_tools.append("web_search")
         self.tool_config: Dict[str, Any] = {}
 
         # Budget manager
@@ -127,6 +145,10 @@ class ChatController(ABC):
         )
         self.session._context_preamble = self.context_preamble
 
+        # Auto-select mode: silently picks the best model per turn
+        # NOTE: _auto_select and _auto_select_base_model are set in the
+        # model selection block above (lines 76-94). Do NOT reset them here.
+
         # Streaming state
         self._streaming_task: Optional[asyncio.Task] = None
         self._text_content: str = ""
@@ -151,6 +173,145 @@ class ChatController(ABC):
 
     # ========== BUSINESS LOGIC (concrete methods) ==========
 
+    # ── Auto-select model routing ──────────────────────────────
+
+    _AUTO_SELECT_OPUS_KEYWORDS = re.compile(
+        r"analys|compar|explain.*detail|deep.*dive|research|summar.*report"
+        r"|evaluat|review.*code|refactor|architect|design.*system"
+        r"|write.*essay|write.*report|create.*present|build.*plan",
+        re.IGNORECASE,
+    )
+
+    async def _auto_select_model(self, message: str, images: list | None) -> None:
+        """Pick the best model for this turn based on context.
+
+        Called before ``send_message()`` when ``_auto_select`` is True.
+        Silently switches the underlying model without notifying the user.
+
+        Routing rules:
+        - Attachments (images/files) → Opus (best multimodal + long context)
+        - Complex tool-heavy context (many tool calls in history) → Opus
+        - Long conversation (>20 messages) → Opus (better context handling)
+        - Analytical/complex keywords → Opus
+        - Everything else → Sonnet (fast, cost-effective)
+        """
+        # Candidate models (first available wins)
+        sonnet = llm_manager.get_default_model("medium") or "claude_sonnet"
+        opus_name = "claude_opus"
+        opus_info = llm_manager.get_model_info(opus_name)
+        if not opus_info:
+            # Opus not available — stay on current
+            logger.info("[AUTO-SELECT] Opus not available, staying on %s", self.model)
+            return
+
+        target = sonnet  # default: fast model
+        reason = "simple query"
+
+        # ── Decision factors ──
+        has_images = bool(images)
+        has_files = False
+        try:
+            from llming_lodge.documents.upload_manager import UploadManager
+            um = UploadManager.get(getattr(self, 'session_id', ''))
+            has_files = bool(um and um.files)
+        except Exception:
+            pass
+
+        history_len = len(self.session.history.messages) if self.session else 0
+        tool_calls_in_history = sum(
+            1 for msg in (self.session.history.messages if self.session else [])
+            if msg.role == Role.ASSISTANT and id(msg) in self._message_tool_calls
+        )
+
+        if has_images or has_files:
+            target = opus_name
+            reason = f"attachments present (images={has_images}, files={has_files})"
+        elif tool_calls_in_history >= 3:
+            target = opus_name
+            reason = f"complex tool usage ({tool_calls_in_history} tool calls in history)"
+        elif history_len > 20:
+            target = opus_name
+            reason = f"long conversation ({history_len} messages)"
+        elif self._AUTO_SELECT_OPUS_KEYWORDS.search(message):
+            target = opus_name
+            reason = f"complex query (keyword match)"
+
+        # Resolve actual model name
+        target_info = llm_manager.get_model_info(target)
+        if not target_info:
+            logger.warning("[AUTO-SELECT] Target %s not available", target)
+            return
+
+        actual_model = target_info.model
+        if actual_model != self.model:
+            old = self.model
+            await self._silent_switch_model(actual_model)
+            logger.info("[AUTO-SELECT] %s → %s (reason: %s)", old, actual_model, reason)
+        else:
+            logger.info("[AUTO-SELECT] Staying on %s (reason: %s)", self.model, reason)
+
+    async def _silent_switch_model(self, model: str) -> None:
+        """Switch model without sending model_switched to the client.
+
+        Same as ``switch_model()`` but suppresses the UI notification.
+        The user sees the auto-select label, not the underlying model.
+        """
+        if model == self.model:
+            return
+
+        model_info = llm_manager.get_model_info(model)
+        new_config = llm_manager.get_config_for_model(model)
+        new_config.temperature = self.temperature
+        new_config.max_input_tokens = model_info.max_input_tokens
+        new_config.max_tokens = model_info.max_output_tokens
+        new_config.mcp_servers = self.mcp_servers if self.mcp_servers else None
+        new_config.tool_config = self.tool_config
+
+        new_provider = llm_manager.get_provider_for_model(model)
+        new_available_tools = self._get_available_tools_for_provider(new_provider)
+        # Preserve all user-enabled tools (unavailable ones are grayed out, not removed)
+        new_enabled_tools = list(self.enabled_tools)
+        model_defaults = list(getattr(model_info, 'default_tools', []))
+        for tool_name in model_defaults:
+            if tool_name not in new_enabled_tools:
+                new_enabled_tools.append(tool_name)
+        new_config.tools = new_enabled_tools
+
+        old_history = self.session.get_history()
+        old_condensed = getattr(self.session, '_condensed_summary', None)
+        new_history = ChatHistory()
+        for msg in old_history.messages:
+            if msg.role != Role.SYSTEM:
+                new_history.add_message(msg)
+
+        old_mcp_groups = getattr(self.session, '_mcp_server_groups', {})
+        old_mcp_connections = getattr(self.session, '_mcp_connections', {})
+
+        self.session = ChatSession.create_with_history(
+            config=new_config, history=new_history,
+            system_prompt=self.system_prompt,
+            budget_manager=self.budget_manager, user_id=self.user_mail,
+        )
+        self.session._mcp_server_groups = old_mcp_groups
+        self.session._mcp_connections = old_mcp_connections
+        self.session._context_preamble = self.context_preamble
+        ad_catalog = getattr(self, "_auto_discover_catalog", None)
+        if ad_catalog:
+            self.session._system_prompt_suffix = ad_catalog
+        if old_condensed:
+            self.session._condensed_summary = old_condensed
+
+        self.config = new_config
+        self.model = model
+        self.provider = new_provider
+        self.available_tools = new_available_tools
+        self.enabled_tools = new_enabled_tools
+        self.max_input_tokens = model_info.max_input_tokens
+        self.max_output_tokens = model_info.max_output_tokens
+        # NOTE: no _on_model_switched() call — silent switch
+
+    # ── Message sending ──────────────────────────────────────
+
     async def send_message(
         self,
         message: str,
@@ -168,6 +329,10 @@ class ChatController(ABC):
         if self._streaming_task and not self._streaming_task.done():
             await self.stop_streaming()
             return ""
+
+        # Auto-select: pick optimal model before sending
+        if self._auto_select:
+            await self._auto_select_model(message, images)
 
         # Reset streaming state
         self._text_content = ""
@@ -259,12 +424,43 @@ class ChatController(ABC):
                 pass
             self._streaming_task = None
 
-    async def switch_model(self, model: str) -> None:
+    async def switch_model(self, model: str, _force: bool = False) -> None:
         """Switch to a different model, preserving history.
 
         Args:
-            model: Model name to switch to
+            model: Model name to switch to. Use ``@auto`` for intelligent
+                auto-selection mode (picks the best model per turn).
+            _force: Internal flag to bypass model lock (used by system droplets).
         """
+        # Block switching when model is locked by a system droplet
+        if not _force and getattr(self, '_model_locked', False):
+            logger.info("[MODEL] Switch to %s blocked — model locked by %s",
+                        model, getattr(self, '_model_locked_reason', ''))
+            return
+
+        # Handle @auto — enter auto-select mode
+        if model == "@auto":
+            if not self._auto_select:
+                self._auto_select = True
+                self._auto_select_base_model = self.model
+                logger.info("[AUTO-SELECT] Enabled — base model: %s", self.model)
+                # Start on Sonnet (fast default)
+                sonnet = llm_manager.get_default_model("medium") or "claude_sonnet"
+                sonnet_info = llm_manager.get_model_info(sonnet)
+                if sonnet_info and sonnet_info.model != self.model:
+                    old = self.model
+                    await self._silent_switch_model(sonnet_info.model)
+                    logger.info("[AUTO-SELECT] Initial switch: %s → %s", old, sonnet_info.model)
+                # Notify client of the switch
+                self._on_model_switched(self.model, "@auto")
+            return
+
+        # Leaving auto-select mode (explicit model choice)
+        if self._auto_select:
+            self._auto_select = False
+            self._auto_select_base_model = ""
+            logger.info("[AUTO-SELECT] Disabled — user chose %s", model)
+
         # Handle @ prefix for provider defaults
         if model.startswith('@'):
             model = llm_manager.get_default_model(model[1:])
@@ -291,12 +487,15 @@ class ChatController(ABC):
         new_provider = llm_manager.get_provider_for_model(model)
         new_available_tools = self._get_available_tools_for_provider(new_provider)
 
-        # Start with model defaults
-        new_enabled_tools = list(getattr(model_info, 'default_tools', new_available_tools))
-
-        # Preserve user-enabled tools that are still available on the new provider
-        for tool_name in self.enabled_tools:
-            if tool_name in new_available_tools and tool_name not in new_enabled_tools:
+        # Preserve ALL user-enabled tools across model switches.
+        # Tools unavailable for the new provider stay in enabled_tools
+        # but are grayed out in the UI (available=false). When switching
+        # back to a provider that supports them, they reappear as enabled.
+        new_enabled_tools = list(self.enabled_tools)
+        # Add model defaults that aren't already enabled
+        model_defaults = list(getattr(model_info, 'default_tools', []))
+        for tool_name in model_defaults:
+            if tool_name not in new_enabled_tools:
                 new_enabled_tools.append(tool_name)
 
         new_config.tools = new_enabled_tools
@@ -465,6 +664,9 @@ class ChatController(ABC):
                     self.enabled_tools.append(tool_name)
             # Refresh available tools list to include MCP tools
             self.available_tools = self._get_available_tools_for_provider(self.provider)
+        # web_search is always enabled by default
+        if "web_search" not in self.enabled_tools:
+            self.enabled_tools.append("web_search")
         logger.info(f"[TOOLS] After sync: enabled_tools={self.enabled_tools}, available_tools={self.available_tools}")
 
     def _is_tool_available_for_provider(self, tool: ToolDefinition, provider: str) -> bool:
@@ -518,7 +720,7 @@ class ChatController(ABC):
                 requires = group.get("requires_providers")
                 available = not (exclude and self.provider in exclude)
                 if available and requires:
-                    from llming_lodge.tools.tool_definition import PROVIDER_COMPAT
+                    from llming_models.tools.tool_definition import PROVIDER_COMPAT
                     effective = PROVIDER_COMPAT.get(self.provider, self.provider)
                     available = (self.provider in requires or effective in requires)
 

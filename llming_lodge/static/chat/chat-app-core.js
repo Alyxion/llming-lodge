@@ -19,6 +19,11 @@ Object.assign(ChatApp.prototype, {
     this.config = config;
     this.idb = new IDBStore();
 
+    // Console log capture (ring buffer for debug API access)
+    this._consoleLogs = [];
+    this._consoleLogMax = 500;
+    this._hookConsole();
+
     // Document plugin registry
     this.docPlugins = window.DocPluginRegistry ? new window.DocPluginRegistry() : null;
     if (this.docPlugins && window.registerBuiltinPlugins) {
@@ -163,16 +168,75 @@ Object.assign(ChatApp.prototype, {
     this.suggestionsMenuOpen = false;
     this.contextPopoverOpen = false;
     this.gearMenuOpen = false;
+    this.incognito = false;
 
     // DOM refs (set in render())
     this.el = {};
 
+    // Permissions set (from server config)
+    this._permissions = new Set(config.permissions || []);
+
     // Let feature modules initialize their state
     ChatFeatures.initAllState(this);
+
+    // Populate app extension manifests from server config (lazy — scripts not loaded yet)
+    if (this._appExt && config.appExtensions) {
+      this._appExt.manifests = config.appExtensions;
+    }
+  },
+
+  /** Check if the current user has a specific permission. */
+  hasPerm(perm) { return this._permissions.has(perm); },
+
+  /**
+   * Hook console.log/warn/error to capture messages in a ring buffer.
+   * Originals still fire so DevTools works normally.
+   */
+  _hookConsole() {
+    const self = this;
+    const _origLog = console.log;
+    const _origWarn = console.warn;
+    const _origError = console.error;
+
+    function _capture(level, origFn, args) {
+      origFn.apply(console, args);
+      try {
+        const entry = {
+          ts: Date.now(),
+          level,
+          msg: Array.from(args).map(a => {
+            if (a instanceof Error) return `${a.message}\n${a.stack || ''}`;
+            if (typeof a === 'object') { try { return JSON.stringify(a); } catch { return String(a); } }
+            return String(a);
+          }).join(' '),
+        };
+        self._consoleLogs.push(entry);
+        if (self._consoleLogs.length > self._consoleLogMax) {
+          self._consoleLogs.splice(0, self._consoleLogs.length - self._consoleLogMax);
+        }
+      } catch (_) { /* never break console */ }
+    }
+
+    console.log = function() { _capture('log', _origLog, arguments); };
+    console.warn = function() { _capture('warn', _origWarn, arguments); };
+    console.error = function() { _capture('error', _origError, arguments); };
   },
 
   async init() {
     await this.idb.open();
+    // Gate persistence — incognito sessions are never written to IndexedDB.
+    // Track incognito conversation IDs so late-arriving save_conversation
+    // messages (after exiting incognito) are still blocked.
+    this._incognitoConvIds = new Set();
+    const _realPut = this.idb.put.bind(this.idb);
+    this.idb.put = (data) => {
+      if (this.incognito) {
+        if (data?.id) this._incognitoConvIds.add(data.id);
+        return Promise.resolve();
+      }
+      if (data?.id && this._incognitoConvIds.has(data.id)) return Promise.resolve();
+      return _realPut(data);
+    };
     // Expose globally for /chat interop
     window.IDBStore = {
       ready: true,
@@ -194,7 +258,9 @@ Object.assign(ChatApp.prototype, {
 
     this.render();
     this._applyTheme();
+    ChatFeatures.cacheAllEls(this);
     this.bindEvents();
+    ChatFeatures.bindAllEvents(this);
     this._updateSendButton();
     this._startDraftSaver();
     await this.refreshConversations();
@@ -316,6 +382,11 @@ Object.assign(ChatApp.prototype, {
       onOpen: () => {
         console.log('[Chat] WebSocket connected');
         this._setStatus('connected');
+        try {
+          const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+          const favUids = (this.favoriteNudges || []).map(f => f.uid).filter(Boolean);
+          this.ws.send({ type: 'client_hello', timezone: tz, favorite_uids: favUids });
+        } catch (e) { /* ignore */ }
       },
       onClose: (e) => {
         console.log('[Chat] WebSocket closed:', e.code);
@@ -327,12 +398,18 @@ Object.assign(ChatApp.prototype, {
   },
 
   _setStatus(status) {
-    // Could show a connection indicator
+    if (status === 'disconnected' || status === 'error') {
+      this._appExtDeactivateAll();
+    }
   },
 
   // ── Message Dispatch ──────────────────────────────────
 
   handleMessage(msg) {
+    // API keys dialog handler (ephemeral, set while dialog is open)
+    if (msg.type && msg.type.startsWith('apikeys:') && this._apiKeysDialogHandler) {
+      return this._apiKeysDialogHandler(msg);
+    }
     // Check feature-registered handlers first
     const handler = _featureMessageHandlers[msg.type];
     if (typeof handler === 'function') {
@@ -344,6 +421,10 @@ Object.assign(ChatApp.prototype, {
     // Core-only handlers
     switch (msg.type) {
       case 'heartbeat_ack': return; // ignore
+      case 'dev_reload':
+        console.log('[Chat] Dev reload triggered — reloading page');
+        location.reload();
+        return;
       default:
         console.warn('[Chat] Unknown message type:', msg.type);
     }
@@ -357,6 +438,13 @@ Object.assign(ChatApp.prototype, {
       this._switchView('chat');
     }
     this.chatVisible = true;
+    // Hide incognito toggle only once a conversation has messages
+    // (allow toggling off before first message is sent)
+    const incBtn = document.getElementById('cv2-incognito-toggle');
+    if (incBtn && !this.incognito) {
+      const hasMessages = this.el.messages && this.el.messages.children.length > 0;
+      incBtn.style.display = hasMessages ? 'none' : '';
+    }
     this._stopPlaceholderCycle();
     // Clear project-view hiding classes (defensive against hot-reload stale DOM)
     this.el.initialView.classList.remove('cv2-pv-hidden');
@@ -444,6 +532,11 @@ Object.assign(ChatApp.prototype, {
               </button>
               <button class="cv2-gear-popover-item cv2-danger" id="cv2-clear-all">
                 <span class="material-icons">delete_sweep</span> ${this.t('chat.clear_all')}
+              </button>
+            </div>
+            <div class="cv2-gear-popover" id="cv2-dev-settings-popover">
+              <button class="cv2-gear-popover-item" id="cv2-dev-api-keys">
+                <span class="material-icons">vpn_key</span> API Keys
               </button>
             </div>
           </div>
@@ -802,7 +895,13 @@ Object.assign(ChatApp.prototype, {
             ? `<a href="${this._escAttr(logoLink)}" class="cv2-topbar-logo-link"><img class="cv2-topbar-logo" src="${this._escAttr(this.config.appLogo)}" alt=""></a>`
             : `<img class="cv2-topbar-logo" src="${this._escAttr(this.config.appLogo)}" alt="">`) : ''}
           <div style="flex:1"></div>
-          ${this.config.isAdmin ? `
+          <button class="cv2-incognito-toggle" id="cv2-incognito-toggle" title="Incognito — chat won't be saved">
+            <svg width="27" height="27" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-top:3px">
+              <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" stroke-dasharray="4 3"/>
+            </svg>
+          </button>
+          <div style="width:8px"></div>
+          ${this.hasPerm('nudge_admin') ? `
           <div style="position:relative" id="cv2-admin-menu-wrap">
             <button class="cv2-topbar-btn" id="cv2-admin-btn" title="Admin">
               <span class="material-icons">admin_panel_settings</span>
@@ -824,7 +923,7 @@ Object.assign(ChatApp.prototype, {
           <div class="cv2-initial-view" id="cv2-initial-view">
             ${this.config.bgLogoSvg ? `<svg class="cv2-brand-logo" viewBox="-2 4 175 48" preserveAspectRatio="xMidYMid meet">${this.config.bgLogoSvg}</svg>` : ''}
             <div class="cv2-greeting-row">
-              ${this.config.appMascot ? `<img class="cv2-mascot" src="${this._escAttr(this.config.appMascot)}" alt="">` : ''}
+              ${this.config.appMascot ? `<img class="cv2-mascot" src="${this._escAttr(this.incognito && this.config.appMascotIncognito ? this.config.appMascotIncognito : this.config.appMascot)}" data-default-src="${this._escAttr(this.config.appMascot)}" alt="">` : ''}
               <h2 id="cv2-greeting"></h2>
             </div>
           </div>
@@ -1002,6 +1101,8 @@ Object.assign(ChatApp.prototype, {
       devMenu: root.querySelector('#cv2-dev-menu'),
       devResetTools: root.querySelector('#cv2-dev-reset-tools'),
       devClearStorage: root.querySelector('#cv2-dev-clear-storage'),
+      devSettingsPopover: root.querySelector('#cv2-dev-settings-popover'),
+      devApiKeysBtn: root.querySelector('#cv2-dev-api-keys'),
       budget: root.querySelector('#cv2-budget'),
       modelBtn: root.querySelector('#cv2-model-btn'),
       modelDropdown: root.querySelector('#cv2-model-dropdown'),
@@ -1236,7 +1337,24 @@ Object.assign(ChatApp.prototype, {
     // Send
     this.el.sendBtn.addEventListener('click', () => this.sendMessage());
     this.el.textarea.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && e.ctrlKey && e.shiftKey) {
+        e.preventDefault();
+        this._copyCurlCommand();
+        return;
+      }
+      // Let the bolt system intercept Enter before sending to LLM
       if (e.key === 'Enter' && !e.shiftKey) {
+        const hasBoltFn = typeof this._boltsOnKeydown === 'function';
+        if (hasBoltFn) {
+          const handled = this._boltsOnKeydown(e);
+          if (handled) {
+            console.log('[Chat] Bolt intercepted Enter — NOT sending to LLM');
+            return;
+          }
+          console.log('[Chat] Bolt did NOT intercept Enter — sending to LLM');
+        }
+        // Hide bolt chips when falling through to LLM
+        if (typeof this._boltsHideChips === 'function') this._boltsHideChips();
         e.preventDefault();
         this.sendMessage();
       }
@@ -1262,7 +1380,7 @@ Object.assign(ChatApp.prototype, {
         this.el.sidebar.classList.remove('cv2-sidebar-rail');
         this.el.sidebar.classList.toggle('cv2-hidden', !visible);
         this.el.sidebarToggle.style.display = visible ? 'none' : '';
-        if (topbarLogo) topbarLogo.style.display = visible ? 'none' : '';
+        if (topbarLogo) topbarLogo.style.display = 'none';
         if (backdrop) backdrop.classList.toggle('cv2-visible', visible);
         if (closeIcon) closeIcon.textContent = 'chevron_left';
       } else {
@@ -1335,8 +1453,51 @@ Object.assign(ChatApp.prototype, {
 
     // New chat (respects active project context)
     this.el.newChat.addEventListener('click', () => {
+      if (this.streaming) {
+        this.ws.send({ type: 'stop_streaming' });
+        this.streaming = false;
+        this._updateSendButton();
+      }
       this._closeSidebarOnMobile();
+      this._pendingFirstMsgHtml = null;  // prevent stale message from previous chat
+      // Send new_chat BEFORE exiting incognito — the server may send
+      // save_conversation for the old chat during new_chat processing.
+      // If we exit incognito first, idb.put() would persist the incognito
+      // conversation (race condition).
       this.ws.send({ type: 'new_chat' });
+      if (this.incognito) this._exitIncognito();
+    });
+
+    // Incognito toggle in topbar
+    document.getElementById('cv2-incognito-toggle')?.addEventListener('click', () => {
+      if (this.incognito) {
+        // Turn off — send new_chat first, THEN exit incognito
+        // (prevents save_conversation race persisting incognito chat)
+        this.ws.send({ type: 'new_chat' });
+        this._exitIncognito();
+      } else {
+        // Turn on — start a fresh incognito chat
+        if (this.streaming) {
+          this.ws.send({ type: 'stop_streaming' });
+          this.streaming = false;
+          this._updateSendButton();
+        }
+        this._pendingFirstMsgHtml = null;
+        this.incognito = true;
+        const root = document.getElementById('chat-app');
+        root?.classList.add('cv2-dark', 'cv2-incognito');
+        const incBtn = document.getElementById('cv2-incognito-toggle');
+        // Keep button visible so user can toggle off before first message
+        if (incBtn) { incBtn.classList.add('cv2-active'); }
+        // Swap mascot to incognito variant
+        if (this.config.appMascotIncognito) {
+          const mascotEl = root?.querySelector('.cv2-mascot');
+          if (mascotEl) {
+            mascotEl.src = this.config.appMascotIncognito;
+          }
+        }
+        this.ws.send({ type: 'new_chat' });
+      }
     });
 
     // Model dropdown
@@ -1370,7 +1531,7 @@ Object.assign(ChatApp.prototype, {
     // Context popover (Shift+click → Prompt Inspector for admins)
     this.el.contextCircle.addEventListener('click', (e) => {
       e.stopPropagation();
-      if (e.shiftKey && this.config.isAdmin) {
+      if (e.shiftKey && this.hasPerm('dev_tools')) {
         this._closeAllPopups();
         this.ws.send({ type: 'get_prompt_inspector' });
         return;
@@ -1385,14 +1546,28 @@ Object.assign(ChatApp.prototype, {
       }
     });
 
-    // Gear menu (settings: dark mode, export, clear all)
+    // Gear menu (settings: color mode, export, clear all)
     this.el.gearBtn.addEventListener('click', (e) => {
       e.stopPropagation();
+      if (e.shiftKey && this.hasPerm('dev_tools')) {
+        // Dev settings popover
+        this._closeAllPopups('devSettings');
+        this.devSettingsOpen = !this.devSettingsOpen;
+        this.el.devSettingsPopover.classList.toggle('cv2-visible', this.devSettingsOpen);
+        return;
+      }
       const willOpen = !this.gearMenuOpen;
       this._closeAllPopups('gear');
       this.gearMenuOpen = willOpen;
       this.el.gearPopover.classList.toggle('cv2-visible', this.gearMenuOpen);
       if (!willOpen) this.el.voiceSettingsMenu.style.display = 'none';
+    });
+
+    // Dev settings: API Keys
+    this.el.devApiKeysBtn.addEventListener('click', () => {
+      this.devSettingsOpen = false;
+      this.el.devSettingsPopover.classList.remove('cv2-visible');
+      this._showApiKeysDialog();
     });
 
     // Theme selector (inside gear menu)
@@ -1537,20 +1712,25 @@ Object.assign(ChatApp.prototype, {
       }
     });
 
-    // Mobile big mic button — acts like PTT press/release
+    // Mobile big mic button — true PTT (press to record, release to send)
     if (this.el.mobileMicBtn) {
-      this.el.mobileMicBtn.addEventListener('click', () => {
+      const micDown = (e) => {
+        e.preventDefault();
         if (!this._speechMode) return;
-        if (this._voiceRecorder && this._voiceRecorder.state === 'recording') {
-          // Already recording — send
-          this.el.mobileMicBtn.classList.remove('cv2-recording');
-          this._sendNowVoiceRecording();
-        } else {
-          // Start recording
-          this.el.mobileMicBtn.classList.add('cv2-recording');
-          this._startVoiceRecording();
-        }
-      });
+        this.el.mobileMicBtn.classList.add('cv2-recording');
+        this._pttPress();
+      };
+      const micUp = () => {
+        if (!this._speechMode) return;
+        this.el.mobileMicBtn.classList.remove('cv2-recording');
+        this._pttRelease();
+      };
+      this.el.mobileMicBtn.addEventListener('touchstart', micDown, { passive: false });
+      this.el.mobileMicBtn.addEventListener('touchend', micUp);
+      this.el.mobileMicBtn.addEventListener('touchcancel', micUp);
+      this.el.mobileMicBtn.addEventListener('mousedown', micDown);
+      this.el.mobileMicBtn.addEventListener('mouseup', micUp);
+      this.el.mobileMicBtn.addEventListener('mouseleave', micUp);
     }
 
     // Push-to-talk mic button (press = start, release = send)
@@ -1718,6 +1898,29 @@ Object.assign(ChatApp.prototype, {
         this._pttRelease();
       }
     });
+
+    // Dev mode: Cmd+Shift+Click (Mac) or Ctrl+Shift+Click (Win/Linux) on doc plugin blocks shows raw data
+    const _devModKey = (e) => (e.metaKey || e.ctrlKey) && e.shiftKey;
+    // Disable iframe pointer-events while modifier keys are held so clicks reach the container
+    const _devIframeToggle = (on) => {
+      if (!this._devMode) return;
+      this.el.messages.querySelectorAll('.cv2-doc-plugin-block iframe').forEach(f => {
+        f.style.pointerEvents = on ? 'none' : '';
+      });
+    };
+    document.addEventListener('keydown', (e) => { if (_devModKey(e)) _devIframeToggle(true); });
+    document.addEventListener('keyup', () => _devIframeToggle(false));
+    this.el.messages.addEventListener('click', (e) => {
+      if (!this._devMode || !_devModKey(e)) return;
+      const block = e.target.closest('.cv2-doc-plugin-block');
+      if (!block) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const raw = block._devRawData;
+      const lang = block._devLang || block.dataset.lang || 'unknown';
+      if (!raw) { this._showToast('No raw data available for this block', 'warning'); return; }
+      this._showDevRawOverlay(lang, raw);
+    }, true);
   },
 
   // ── Helpers ───────────────────────────────────────────
@@ -1746,9 +1949,10 @@ Object.assign(ChatApp.prototype, {
   },
 
   _scrollToBottom() {
-    if (this.el.messages) {
+    const scrollContainer = this.el.messages?.closest('.cv2-main');
+    if (scrollContainer) {
       requestAnimationFrame(() => {
-        this.el.messages.scrollTop = this.el.messages.scrollHeight;
+        scrollContainer.scrollTop = scrollContainer.scrollHeight;
       });
     }
   },
@@ -1800,7 +2004,7 @@ Object.assign(ChatApp.prototype, {
     slot.innerHTML = `
       <button class="cv2-gear-popover-item" id="cv2-theme-gear-btn">
         <span class="material-icons">${cur.icon}</span>
-        <span>${this.t('chat.toggle_dark_mode')}</span>
+        <span>${this.t('chat.color_mode')}</span>
         <span class="material-icons cv2-gear-arrow">chevron_right</span>
       </button>
     `;
@@ -1844,7 +2048,7 @@ Object.assign(ChatApp.prototype, {
         this._themeMode = mode;
         // Only persist to localStorage if no enforced default (enforced resets on reload)
         if (!this._enforcedTheme) {
-          try { localStorage.setItem('chat-theme', mode); } catch {}
+          try { localStorage.setItem('chat-color-mode', mode); } catch {}
         }
         this._applyThemeMode(mode);
         this._renderThemeSelector(); // refresh active state + icon
@@ -1870,12 +2074,45 @@ Object.assign(ChatApp.prototype, {
     if (this.el?.greeting && this._lastGreetName) {
       this.el.greeting.textContent = this._getGreeting(this._lastGreetName);
     }
+    // Broadcast theme CSS custom properties to all doc plugin iframes
+    this._broadcastThemeToIframes();
+  },
+
+  _broadcastThemeToIframes() {
+    try {
+      const rootStyle = getComputedStyle(document.documentElement);
+      const varNames = ['--chat-accent','--chat-bg','--chat-surface','--chat-text',
+        '--chat-border','--chat-text-muted','--chat-code-bg','--chat-code-text','--chat-link'];
+      const vars = {};
+      for (const v of varNames) {
+        const val = rootStyle.getPropertyValue(v).trim();
+        if (val) vars[v] = val;
+      }
+      const msg = { type: 'theme_update', vars };
+      document.querySelectorAll('.cv2-doc-plugin-block iframe').forEach(iframe => {
+        try { iframe.contentWindow?.postMessage(msg, '*'); } catch (_) {}
+      });
+    } catch (_) {}
+  },
+
+  _exitIncognito() {
+    this.incognito = false;
+    const root = document.getElementById('chat-app');
+    root?.classList.remove('cv2-incognito');
+    const incBtn = document.getElementById('cv2-incognito-toggle');
+    if (incBtn) { incBtn.classList.remove('cv2-active'); incBtn.style.display = ''; }
+    // Restore original mascot
+    const mascotEl = root?.querySelector('.cv2-mascot');
+    if (mascotEl) {
+      mascotEl.src = mascotEl.dataset.defaultSrc || this.config.appMascot || '';
+    }
+    this._applyThemeMode(this._themeMode);
   },
 
   _applyStoredTheme() {
     try {
       // Enforced theme overrides localStorage default but user can still switch manually
-      this._themeMode = this._enforcedTheme || localStorage.getItem('chat-theme') || 'auto';
+      this._themeMode = this._enforcedTheme || localStorage.getItem('chat-color-mode') || 'dark';
       this._applyThemeMode(this._themeMode);
 
       // Follow live system changes when in auto mode
@@ -1901,6 +2138,8 @@ Object.assign(ChatApp.prototype, {
 
   _parseSuggestions(text) {
     if (!text) return [];
+    if (Array.isArray(text)) return text.map(s => String(s).trim()).filter(Boolean);
+    if (typeof text !== 'string') text = String(text);
     const parts = text.includes('---') ? text.split('---') : text.split('\n');
     return parts.map(s => s.trim()).filter(Boolean);
   },
@@ -1917,18 +2156,225 @@ Object.assign(ChatApp.prototype, {
 
   _escHtml(s) {
     if (!s) return '';
+    if (typeof s !== 'string') s = String(s);
     return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  },
+
+  _isIconUrl(icon) {
+    return icon && (icon.startsWith('data:') || icon.includes('/') || icon.includes('.'));
+  },
+
+  _renderIcon(icon, imgClass, fallbackIcon) {
+    if (!icon) return `<span class="material-icons ${imgClass || ''}">${this._escHtml(fallbackIcon || 'science')}</span>`;
+    if (this._isIconUrl(icon)) return `<img src="${this._escAttr(icon)}" class="${imgClass || ''}" alt="">`;
+    return `<span class="material-icons ${imgClass || ''}">${this._escHtml(icon)}</span>`;
   },
 
   _escAttr(s) {
     return this._escHtml(s);
   },
 
+  // ── Dev mode: raw data overlay ────────────────────────────
+  _showDevRawOverlay(lang, rawData) {
+    let formatted = rawData;
+    try { formatted = JSON.stringify(JSON.parse(rawData), null, 2); } catch (_) {}
+    const overlay = document.createElement('div');
+    overlay.className = 'cv2-dialog-overlay';
+    overlay.style.zIndex = '9999';
+    overlay.innerHTML = `
+      <div class="cv2-dialog" style="max-width:700px;width:90vw;max-height:80vh;display:flex;flex-direction:column">
+        <div class="cv2-dialog-header" style="display:flex;justify-content:space-between;align-items:center;padding:12px 16px;border-bottom:1px solid var(--chat-border,#e5e7eb)">
+          <span style="font-weight:600;font-size:14px">Raw Data — <code>${this._escHtml(lang)}</code></span>
+          <div style="display:flex;gap:8px">
+            <button class="cv2-dev-copy-btn" style="background:none;border:1px solid var(--chat-border,#e5e7eb);border-radius:4px;padding:4px 10px;cursor:pointer;font-size:12px;color:var(--chat-text,#1f2937)">Copy</button>
+            <button class="cv2-dev-close-btn" style="background:none;border:none;cursor:pointer;font-size:18px;color:var(--chat-text-muted,#6b7280)">&times;</button>
+          </div>
+        </div>
+        <pre style="flex:1;overflow:auto;padding:12px 16px;margin:0;font-size:12px;line-height:1.5;white-space:pre-wrap;word-break:break-all;background:var(--chat-code-bg,#f3f4f6);color:var(--chat-code-text,#1f2937)">${this._escHtml(formatted)}</pre>
+      </div>`;
+    const close = () => overlay.remove();
+    overlay.querySelector('.cv2-dev-close-btn').addEventListener('click', close);
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+    overlay.querySelector('.cv2-dev-copy-btn').addEventListener('click', () => {
+      navigator.clipboard.writeText(formatted).then(() => {
+        overlay.querySelector('.cv2-dev-copy-btn').textContent = 'Copied!';
+        setTimeout(() => { overlay.querySelector('.cv2-dev-copy-btn').textContent = 'Copy'; }, 1500);
+      });
+    });
+    document.body.appendChild(overlay);
+  },
+
+  // ── Ctrl+Shift+Enter: copy curl command ─────────────────
+  _copyCurlCommand() {
+    const text = this.el.textarea.value.trim();
+    if (!text) return;
+    // Find the latest API key from the chat messages (look for llming_ in code blocks)
+    const msgs = this.el.messages;
+    let apiKey = '';
+    if (msgs) {
+      const codeBlocks = msgs.querySelectorAll('code');
+      for (let i = codeBlocks.length - 1; i >= 0; i--) {
+        const content = codeBlocks[i].textContent.trim();
+        if (content.startsWith('llming_') && content.length > 20 && !content.includes(' ')) {
+          apiKey = content;
+          break;
+        }
+      }
+    }
+    if (!apiKey) {
+      // Also check sessionStorage as fallback
+      apiKey = sessionStorage.getItem('cv2_api_key') || '';
+    }
+    if (!apiKey) {
+      console.warn('[Curl] No API key found. Activate remote mode first: /dev remote');
+      return;
+    }
+    const escaped = JSON.stringify(text);
+    const base = window.location.origin;
+    const host = new URL(base).hostname;
+    const insecure = (host === 'localhost' || host === '0.0.0.0' || host === '127.0.0.1') ? ' -k' : '';
+    const curl = `curl -N${insecure} -H "Authorization: Bearer ${apiKey}" -H "Content-Type: application/json" -d '{"text": ${escaped}}' ${base}/api/llming/v1/chat/send`;
+    navigator.clipboard.writeText(curl).then(() => {
+      // Brief visual feedback on the send button
+      const icon = this.el.sendIcon;
+      if (icon) {
+        const prev = icon.textContent;
+        icon.textContent = 'content_copy';
+        setTimeout(() => { icon.textContent = prev; }, 1500);
+      }
+      console.log('[Curl] Copied to clipboard:\n' + curl);
+    });
+  },
+
+  // ── API Keys Dialog ─────────────────────────────────────
+  _showApiKeysDialog() {
+    const app = this;
+    // Request key list from server
+    this.ws.send({ type: 'apikeys:list' });
+
+    const overlay = document.createElement('div');
+    overlay.className = 'cv2-dialog-overlay';
+    overlay.innerHTML = `
+      <div class="cv2-dialog cv2-apikeys-dialog">
+        <div class="cv2-dialog-title">API Keys</div>
+        <div class="cv2-dialog-body">
+          <div class="cv2-apikeys-list" id="cv2-apikeys-list">
+            <div class="cv2-apikeys-loading">Loading…</div>
+          </div>
+          <div class="cv2-apikeys-created-banner" id="cv2-apikeys-created-banner" style="display:none">
+            <div class="cv2-apikeys-created-label">New key created — copy it now (shown only once):</div>
+            <div class="cv2-apikeys-created-key">
+              <code id="cv2-apikeys-full-key"></code>
+              <button class="cv2-apikeys-copy-btn" id="cv2-apikeys-copy-btn" title="Copy">
+                <span class="material-icons" style="font-size:16px">content_copy</span>
+              </button>
+            </div>
+          </div>
+          <div class="cv2-apikeys-create-section">
+            <div class="cv2-apikeys-create-row">
+              <input type="text" id="cv2-apikeys-name-input" placeholder="Key name" class="cv2-apikeys-input" maxlength="64">
+              <button class="cv2-dialog-btn cv2-dialog-confirm" id="cv2-apikeys-create-btn">Create</button>
+            </div>
+            <div class="cv2-apikeys-perms">
+              <label><input type="checkbox" id="cv2-apikeys-perm-droplets" checked> Manage droplets</label>
+              <label><input type="checkbox" id="cv2-apikeys-perm-chat" checked> Automate chat</label>
+            </div>
+          </div>
+        </div>
+        <div class="cv2-dialog-actions">
+          <button class="cv2-dialog-btn cv2-dialog-cancel" id="cv2-apikeys-close">Close</button>
+        </div>
+      </div>`;
+
+    document.getElementById('chat-app').appendChild(overlay);
+
+    const listEl = overlay.querySelector('#cv2-apikeys-list');
+    const banner = overlay.querySelector('#cv2-apikeys-created-banner');
+    const fullKeyEl = overlay.querySelector('#cv2-apikeys-full-key');
+    const closeBtn = overlay.querySelector('#cv2-apikeys-close');
+    const createBtn = overlay.querySelector('#cv2-apikeys-create-btn');
+    const nameInput = overlay.querySelector('#cv2-apikeys-name-input');
+    const copyBtn = overlay.querySelector('#cv2-apikeys-copy-btn');
+    const permDroplets = overlay.querySelector('#cv2-apikeys-perm-droplets');
+    const permChat = overlay.querySelector('#cv2-apikeys-perm-chat');
+
+    const close = () => {
+      app._apiKeysDialogHandler = null;
+      overlay.remove();
+    };
+    closeBtn.addEventListener('click', close);
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+
+    copyBtn.addEventListener('click', () => {
+      const key = fullKeyEl.textContent;
+      navigator.clipboard.writeText(key).then(() => {
+        copyBtn.innerHTML = '<span class="material-icons" style="font-size:16px">check</span>';
+        setTimeout(() => {
+          copyBtn.innerHTML = '<span class="material-icons" style="font-size:16px">content_copy</span>';
+        }, 2000);
+      });
+    });
+
+    createBtn.addEventListener('click', () => {
+      const name = nameInput.value.trim() || 'Unnamed Key';
+      const permissions = [];
+      if (permDroplets.checked) permissions.push('manage_droplets');
+      if (permChat.checked) permissions.push('automate_chat');
+      if (!permissions.length) return;
+      app.ws.send({ type: 'apikeys:create', name, permissions });
+      nameInput.value = '';
+      banner.style.display = 'none';
+    });
+
+    function renderKeys(keys) {
+      if (!keys.length) {
+        listEl.innerHTML = '<div class="cv2-apikeys-empty">No API keys yet.</div>';
+        return;
+      }
+      listEl.innerHTML = keys.map(k => `
+        <div class="cv2-apikeys-item" data-key-id="${app._escAttr(k.key_id)}">
+          <div class="cv2-apikeys-item-info">
+            <span class="cv2-apikeys-item-name">${app._escHtml(k.name)}</span>
+            <code class="cv2-apikeys-item-prefix">${app._escHtml(k.key_prefix)}…</code>
+            <span class="cv2-apikeys-item-perms">${(k.permissions || []).map(p =>
+              '<span class="cv2-apikeys-badge">' + app._escHtml(p.replace('_', ' ')) + '</span>'
+            ).join('')}</span>
+          </div>
+          <button class="cv2-apikeys-delete-btn" data-key-id="${app._escAttr(k.key_id)}" title="Delete">
+            <span class="material-icons" style="font-size:16px">delete</span>
+          </button>
+        </div>`).join('');
+      listEl.querySelectorAll('.cv2-apikeys-delete-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const keyId = btn.dataset.keyId;
+          app.ws.send({ type: 'apikeys:delete', key_id: keyId });
+        });
+      });
+    }
+
+    // WS message handler for apikeys responses
+    app._apiKeysDialogHandler = (msg) => {
+      if (msg.type === 'apikeys:list') {
+        renderKeys(msg.keys || []);
+      } else if (msg.type === 'apikeys:created') {
+        fullKeyEl.textContent = msg.full_key;
+        banner.style.display = '';
+        sessionStorage.setItem('cv2_api_key', msg.full_key);
+        // Refresh list
+        app.ws.send({ type: 'apikeys:list' });
+      } else if (msg.type === 'apikeys:deleted') {
+        const item = listEl.querySelector(`[data-key-id="${msg.key_id}"]`);
+        if (item) item.remove();
+        if (!listEl.children.length) renderKeys([]);
+      }
+    };
+  },
+
 });
 
 
 /* ══════════════════════════════════════════════════════════
-   Boot — wait for NiceGUI to render the #chat-app mount point
+   Boot — find the #chat-app mount point and start the app
    ══════════════════════════════════════════════════════════ */
 
 function _bootChat() {
@@ -1938,8 +2384,7 @@ function _bootChat() {
     return;
   }
 
-  // NiceGUI renders ui.html() content asynchronously via Vue.
-  // Poll until the mount point exists in the DOM.
+  // Poll until the mount point exists in the DOM (may be async).
   function tryInit() {
     const root = document.getElementById('chat-app');
     if (root) {

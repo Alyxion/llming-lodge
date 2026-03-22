@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240" fill="none">
+  <circle cx="120" cy="120" r="110" fill="#6366f1" opacity="0.15"/>
+  <circle cx="120" cy="120" r="80" fill="#6366f1" opacity="0.25"/>
+  <path d="M120 50 L140 100 L195 105 L155 140 L165 195 L120 168 L75 195 L85 140 L45 105 L100 100 Z" fill="#6366f1" stroke="#6366f1" stroke-width="3" stroke-linejoin="round"/>
+  <text x="120" y="135" text-anchor="middle" font-family="Arial,sans-serif" font-weight="bold" font-size="36" fill="white">AI</text>
+</svg>

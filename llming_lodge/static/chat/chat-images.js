@@ -9,6 +9,7 @@
 
     _extractInlineImages(text) {
       const images = [];
+      if (!text) return { images, text: text || '' };
       let cleaned = text;
 
       // Markdown images with base64
@@ -255,14 +256,33 @@
       if (newCount > ChatApp.MAX_FILES) {
         return this.t('chat.error_max_files', { max: String(ChatApp.MAX_FILES) });
       }
+      // MIME types that support server-side text extraction for oversized files
+      const _EXTRACTABLE_EXTS = new Set(['pdf', 'docx']);
       let newTotalSize = stats.totalSize;
       for (const f of newFiles) {
         if (f.size > ChatApp.MAX_SINGLE_FILE) {
-          return this.t('chat.error_file_too_large', { name: f.name, max: '5 MB' });
+          const ext = f.name.split('.').pop()?.toLowerCase() || '';
+          if (_EXTRACTABLE_EXTS.has(ext) && f.size <= 50 * 1024 * 1024) {
+            // Allow — server will extract text from oversized PDF/DOCX
+            this._showToast(
+              this.t('chat.info_large_file_extract', {
+                name: f.name,
+                size: (f.size / (1024 * 1024)).toFixed(1) + ' MB',
+              }) || `${f.name} (${(f.size / (1024*1024)).toFixed(1)} MB) is large — text will be extracted automatically.`,
+              'info'
+            );
+          } else {
+            return this.t('chat.error_file_too_large', { name: f.name, max: '5 MB' });
+          }
         }
         newTotalSize += f.size;
       }
-      if (newTotalSize > ChatApp.MAX_TOTAL_SIZE) {
+      // Skip total size check for extracted files (they don't consume raw_data memory)
+      const nonExtractableSize = Array.from(newFiles).reduce((sum, f) => {
+        const ext = f.name.split('.').pop()?.toLowerCase() || '';
+        return sum + (f.size > ChatApp.MAX_SINGLE_FILE && _EXTRACTABLE_EXTS.has(ext) ? 0 : f.size);
+      }, stats.totalSize);
+      if (nonExtractableSize > ChatApp.MAX_TOTAL_SIZE) {
         return this.t('chat.error_total_size', { max: '10 MB' });
       }
       return null;
@@ -293,9 +313,9 @@
         this._showToast(this.t('chat.error_large_spreadsheet', { name: file.name }), 'warning');
         return false;
       }
-      // PDF > 5MB is likely very large
-      if (ext === 'pdf' && file.size > ChatApp.MAX_SINGLE_FILE) {
-        return false; // will be caught by size validation
+      // PDF > 50MB is too large even for extraction
+      if (ext === 'pdf' && file.size > 50 * 1024 * 1024) {
+        return false;
       }
       return true;
     },

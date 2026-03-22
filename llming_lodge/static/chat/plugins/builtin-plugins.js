@@ -29,7 +29,39 @@ function _loadScript(src) {
 /* ── Parse JSON safely ────────────────────────────────────── */
 function _parseJSON(raw) {
   try { return JSON.parse(raw); }
-  catch { return null; }
+  catch (firstErr) {
+    // LLMs sometimes produce unescaped " inside HTML string values
+    // (e.g. body_html with „text"</b>). Repair by escaping quotes
+    // between HTML tags that break JSON parsing.
+    try {
+      // Strategy: walk the string, track JSON string boundaries,
+      // and escape any unescaped " that doesn't look like a JSON delimiter.
+      let fixed = '';
+      let inString = false;
+      let escaped = false;
+      for (let i = 0; i < raw.length; i++) {
+        const ch = raw[i];
+        if (escaped) { fixed += ch; escaped = false; continue; }
+        if (ch === '\\' && inString) { fixed += ch; escaped = true; continue; }
+        if (ch === '"') {
+          if (!inString) {
+            inString = true; fixed += ch; continue;
+          }
+          // We're inside a string and hit ". Is this the real end?
+          const after = raw.substring(i + 1).trimStart();
+          if (after[0] === ':' || after[0] === ',' || after[0] === '}' ||
+              after[0] === ']' || after[0] === undefined) {
+            // Looks like a JSON delimiter — end the string
+            inString = false; fixed += ch; continue;
+          }
+          // Not a JSON delimiter — this is an unescaped " inside a value
+          fixed += '\\"'; continue;
+        }
+        fixed += ch;
+      }
+      return JSON.parse(fixed);
+    } catch { return null; }
+  }
 }
 
 function _escHtml(s) {
@@ -259,6 +291,24 @@ async function _pvRenderContent(container, att, sessionId) {
       return;
     }
     if (entry?.lang === 'table') { _pvRenderTable(container, entry.data); return; }
+    if (entry?.lang === 'rich_mcp') {
+      container.innerHTML = '';
+      const spec = entry.data;
+      const render = spec?.render;
+      try {
+        if (render?.type === 'math_result') {
+          const vendorScripts = await _resolveRichMcpVendorLibs(['katex_js', 'katex_css']);
+          _mathResultIframe(container, render, vendorScripts);
+        } else if (render?.type === 'html_sandbox') {
+          const vendorLibs = render.vendor_libs || [];
+          const vendorScripts = await _resolveRichMcpVendorLibs(vendorLibs);
+          _richMcpSandboxIframe(container, render, vendorScripts, render.title || 'Visualization');
+        }
+      } catch (err) {
+        container.innerHTML = `<div style="color:var(--chat-text-muted);padding:12px">${_escHtml(err.message)}</div>`;
+      }
+      return;
+    }
     if (entry?.lang === 'html_sandbox' || entry?.lang === 'html') {
       let src;
       if (typeof entry.data === 'string') {
@@ -453,7 +503,7 @@ function _pvRenderMeta(container, name, detail, icon) {
 
 function _pvDocIcon(lang) {
   if (typeof ChatApp !== 'undefined' && ChatApp.DOC_ICONS?.[lang]) return ChatApp.DOC_ICONS[lang];
-  return { plotly: 'show_chart', table: 'table_chart', text_doc: 'description', word: 'description', presentation: 'slideshow', powerpoint: 'slideshow', html: 'code', html_sandbox: 'code' }[lang] || 'article';
+  return { plotly: 'show_chart', table: 'table_chart', text_doc: 'description', word: 'description', presentation: 'slideshow', powerpoint: 'slideshow', html: 'code', html_sandbox: 'code', rich_mcp: 'calculate' }[lang] || 'article';
 }
 
 /* Open a dynamic document in a floating, draggable window.
@@ -487,10 +537,10 @@ function _showDocWindowed(blockId) {
     if (!_pvEl) return;
     _pvEl.classList.add('cv2-preview-windowed');
     _pvEl.dataset.blockId = blockId;
-    /* Size: 4:3 aspect ratio, use up to 90% of viewport */
+    /* Size: width-first, landscape-ish for plots/content */
     const vw = window.innerWidth, vh = window.innerHeight;
-    const h = Math.min(Math.max(vh * 0.85, 360), vh - 48);
-    const w = Math.min(Math.round(h * 4 / 3), vw - 48);
+    const w = Math.min(Math.max(Math.round(vw * 0.5), 400), vw - 48);
+    const h = Math.min(Math.round(w * 0.65), vh - 48);
     _pvEl.style.width = w + 'px';
     _pvEl.style.height = h + 'px';
     _pvEl.style.left = Math.round((vw - w) / 2) + 'px';
@@ -953,6 +1003,24 @@ function _setupImageResize(editableEl) {
 }
 
 /* ══════════════════════════════════════════════════════════════
+   Embed behavior registry — mirrors Python EMBED_BEHAVIOR.
+   Declares how each doc type behaves when embedded in another doc.
+   Extensible: new types just add an entry.
+   ══════════════════════════════════════════════════════════════ */
+
+const _EMBED_BEHAVIORS = {
+  plotly:       { mode: 'graphic', aspect: 1.6 },
+  table:        { mode: 'table' },
+  text_doc:     { mode: 'text' },
+  html_sandbox: { mode: 'graphic', aspect: 1.6 },
+  html:         { mode: 'graphic', aspect: 1.6 },
+  presentation: { mode: 'graphic', aspect: 16 / 9 },
+  email_draft:  { mode: 'text' },
+  latex:        { mode: 'graphic', aspect: null },
+  rich_mcp:     { mode: 'graphic', aspect: 1.6 },
+};
+
+/* ══════════════════════════════════════════════════════════════
    Inline Chart helpers — shared by text_doc + email_draft
    ══════════════════════════════════════════════════════════════ */
 
@@ -977,7 +1045,7 @@ function _hydrateInlineCharts(container) {
       font: { color: theme.text, ...(spec.layout?.font || {}) },
       xaxis: { ...(spec.layout?.xaxis || {}), gridcolor: theme.grid, color: theme.text },
       yaxis: { ...(spec.layout?.yaxis || {}), gridcolor: theme.grid, color: theme.text },
-      legend: { ...(spec.layout?.legend || {}), font: { color: theme.text } },
+      legend: { ...(spec.layout?.legend || {}), font: { color: theme.text }, bgcolor: _isDark() ? 'rgba(30,30,40,0.85)' : 'rgba(255,255,255,0.85)' },
     };
     Plotly.newPlot(inner, spec.data || [], layout, { responsive: true, displayModeBar: false, displaylogo: false });
     el.style.cursor = 'pointer';
@@ -1044,12 +1112,13 @@ const plotlyPlugin = {
       ...baseLayout,
       margin: { l: 40, r: 20, t: baseLayout.title ? 40 : 20, b: 40, ...(baseLayout.margin || {}) },
       autosize: true,
+      height: 340,  // match CSS max-height (360px minus padding) — prevents distortion on reload
       paper_bgcolor: theme.paper,
       plot_bgcolor: theme.bg,
       font: { color: theme.text, ...(baseLayout.font || {}) },
       xaxis: { ...(baseLayout.xaxis || {}), gridcolor: theme.grid, color: theme.text },
       yaxis: { ...(baseLayout.yaxis || {}), gridcolor: theme.grid, color: theme.text },
-      legend: { ...(baseLayout.legend || {}), font: { color: theme.text } },
+      legend: { ...(baseLayout.legend || {}), font: { color: theme.text }, bgcolor: _isDark() ? 'rgba(30,30,40,0.85)' : 'rgba(255,255,255,0.85)' },
     };
     const inlineConfig = { responsive: true, displayModeBar: false, displaylogo: false };
     await Plotly.newPlot(preview, spec.data || [], inlineLayout, inlineConfig);
@@ -1126,11 +1195,14 @@ const tablePlugin = {
       return;
     }
 
+    /* Normalise columns: accept strings or {name:…} objects */
+    const colNames = spec.columns.map(c => (typeof c === 'string') ? c : (c.name || c.title || c.label || String(c)));
+
     const table = document.createElement('table');
     table.className = 'cv2-doc-table';
     const thead = document.createElement('thead');
     const headRow = document.createElement('tr');
-    for (const col of spec.columns) {
+    for (const col of colNames) {
       const th = document.createElement('th');
       th.textContent = col;
       headRow.appendChild(th);
@@ -1141,10 +1213,25 @@ const tablePlugin = {
     const tbody = document.createElement('tbody');
     for (const row of spec.rows) {
       const tr = document.createElement('tr');
-      for (const cell of row) {
-        const td = document.createElement('td');
-        td.textContent = cell ?? '';
-        tr.appendChild(td);
+      if (Array.isArray(row)) {
+        for (const cell of row) {
+          const td = document.createElement('td');
+          td.textContent = (cell != null && typeof cell === 'object') ? JSON.stringify(cell) : (cell ?? '');
+          tr.appendChild(td);
+        }
+      } else if (row && typeof row === 'object') {
+        /* Try column-name lookup first; if all miss, fall back to row's own keys in order */
+        const rowKeys = Object.keys(row);
+        let matched = 0;
+        for (const col of colNames) { if (row[col] !== undefined) matched++; }
+        const useKeys = (matched === 0 && rowKeys.length > 0);
+        const keys = useKeys ? rowKeys.slice(0, colNames.length) : colNames;
+        for (const k of keys) {
+          const td = document.createElement('td');
+          const val = row[k];
+          td.textContent = (val != null && typeof val === 'object') ? JSON.stringify(val) : (val ?? '');
+          tr.appendChild(td);
+        }
       }
       tbody.appendChild(tr);
     }
@@ -1475,6 +1562,12 @@ function _htmlToTextDocSections(el) {
         rows.push(row);
       }
       sections.push({ type: 'table', headers, rows });
+    } else if (child.classList?.contains('cv2-doc-embed')) {
+      // Generic embed — preserve the reference
+      const ref = child.dataset.embedRef;
+      if (ref) {
+        sections.push({ type: 'embed', '$ref': ref });
+      }
     } else if (child.classList?.contains('cv2-inline-chart')) {
       try {
         const cd = JSON.parse(child.dataset.plotly || '{}');
@@ -1508,15 +1601,15 @@ const textDocPlugin = {
         case 'heading': {
           const level = Math.min(Math.max(section.level || 1, 1), 6);
           el = document.createElement(`h${level}`);
-          el.innerHTML = section.content || '';
+          el.innerHTML = Array.isArray(section.content) ? section.content.join(' ') : (section.content || '');
           break;
         }
         case 'paragraph':
           el = document.createElement('p');
-          el.innerHTML = section.content || '';
+          el.innerHTML = Array.isArray(section.content) ? section.content.join('<br>') : (section.content || '');
           break;
         case 'list': {
-          const items = section.items || (section.content ? section.content.split('\n') : []);
+          const items = section.items || (Array.isArray(section.content) ? section.content : (section.content ? String(section.content).split('\n') : []));
           el = document.createElement(section.ordered ? 'ol' : 'ul');
           for (const item of items) { const li = document.createElement('li'); li.innerHTML = item; el.appendChild(li); }
           break;
@@ -1546,7 +1639,7 @@ const textDocPlugin = {
           break;
         }
         case 'chart': {
-          // Chart data can be at section level or nested under section.content (like tables)
+          // Legacy chart section — kept for backward compat
           const chartSrc = section.content && typeof section.content === 'object' && (section.content.data || section.content.layout)
             ? section.content : section;
           el = document.createElement('div');
@@ -1555,6 +1648,86 @@ const textDocPlugin = {
             data: chartSrc.data || [],
             layout: chartSrc.layout || {},
           });
+          break;
+        }
+        case 'embed': {
+          // Generic embed — $ref was resolved by resolveBlockRefs.
+          // Determine source type from BlockDataStore by looking up the
+          // resolved data's id field.
+          const chatApp = window.__chatApp;
+          const store = chatApp?._blockDataStore;
+          const srcEntry = section.id ? store?.get(section.id) : null;
+          const srcLang = srcEntry?.lang || '';
+          // Import the embed behavior registry from render.py client-side mirror
+          const embedBehavior = _EMBED_BEHAVIORS[srcLang];
+          const mode = embedBehavior?.mode || 'graphic';
+
+          if (mode === 'graphic' && (section.data || section.layout)) {
+            // Graphic mode (plotly, html, etc.) — render as inline chart
+            el = document.createElement('div');
+            el.className = 'cv2-doc-embed cv2-inline-chart';
+            el.dataset.embedRef = section.id || '';
+            el.dataset.embedMode = 'graphic';
+            el.dataset.plotly = JSON.stringify({
+              data: section.data || [],
+              layout: section.layout || {},
+            });
+          } else if (mode === 'table' && (section.columns || section.rows)) {
+            // Table mode — render as inline table
+            const tSpec = section;
+            // Apply cross-type compat: columns ↔ headers
+            const headers = tSpec.headers || tSpec.columns || [];
+            const rows = tSpec.rows || [];
+            el = document.createElement('table');
+            el.className = 'cv2-doc-embed cv2-doc-table';
+            el.dataset.embedRef = section.id || '';
+            el.dataset.embedMode = 'table';
+            if (headers.length) {
+              const thead = document.createElement('thead');
+              const tr = document.createElement('tr');
+              for (const h of headers) {
+                const th = document.createElement('th');
+                th.textContent = typeof h === 'object' ? (h.label || h.key || '') : h;
+                tr.appendChild(th);
+              }
+              thead.appendChild(tr);
+              el.appendChild(thead);
+            }
+            if (rows.length) {
+              const tbody = document.createElement('tbody');
+              const colKeys = headers.map(h => typeof h === 'object' ? (h.key || h.label || '') : h);
+              for (const row of rows) {
+                const tr = document.createElement('tr');
+                if (Array.isArray(row)) {
+                  for (const cell of row) { const td = document.createElement('td'); td.textContent = cell ?? ''; tr.appendChild(td); }
+                } else if (typeof row === 'object') {
+                  for (const k of colKeys) { const td = document.createElement('td'); td.textContent = row[k] ?? ''; tr.appendChild(td); }
+                }
+                tbody.appendChild(tr);
+              }
+              el.appendChild(tbody);
+            }
+          } else if (mode === 'text' && section.sections) {
+            // Text mode — inline the sections as a sub-document
+            el = document.createElement('div');
+            el.className = 'cv2-doc-embed';
+            el.dataset.embedRef = section.id || '';
+            el.dataset.embedMode = 'text';
+            el.style.cssText = 'border-left:3px solid #ccc;padding-left:12px;margin:8px 0';
+            for (const sub of section.sections) {
+              const p = document.createElement('p');
+              p.innerHTML = sub.content || '';
+              el.appendChild(p);
+            }
+          } else {
+            // Fallback: show as placeholder
+            el = document.createElement('div');
+            el.className = 'cv2-doc-embed';
+            el.dataset.embedRef = section.id || '';
+            el.dataset.embedMode = mode;
+            el.style.cssText = 'padding:12px;background:#f5f5f5;border-radius:6px;margin:8px 0;color:#666;font-style:italic';
+            el.textContent = `[Embedded ${srcLang || 'document'}${section.name ? ': ' + section.name : ''}]`;
+          }
           break;
         }
         default:
@@ -1668,12 +1841,65 @@ const textDocPlugin = {
       const cfg = window.__CHAT_CONFIG__ || {};
       const apiBase = cfg.wsPath ? cfg.wsPath.replace(/\/ws\/.*/, '') : '/api/llming';
       try {
-        // Convert chart sections to inline PNG images for DOCX export
+        // Resolve embeds and convert chart/graphic sections to concrete types for DOCX
         const exportSpec = JSON.parse(JSON.stringify(spec));
-        if (window.Plotly) {
-          for (let i = 0; i < exportSpec.sections.length; i++) {
-            const s = exportSpec.sections[i];
-            if (s.type !== 'chart') continue;
+        const chatApp = window.__chatApp;
+        const store = chatApp?._blockDataStore;
+        for (let i = 0; i < exportSpec.sections.length; i++) {
+          const s = exportSpec.sections[i];
+          // ── Resolve embed sections ──
+          if (s.type === 'embed' && s.$ref && store) {
+            const entry = store.get(s.$ref);
+            if (!entry) continue;
+            const behavior = _EMBED_BEHAVIORS[entry.lang];
+            const mode = behavior?.mode || 'graphic';
+            const srcData = entry.data || {};
+            if (mode === 'graphic') {
+              // Graphic embed → render to PNG
+              const plotlyData = srcData.data || [];
+              const plotlyLayout = srcData.layout || {};
+              if (window.Plotly && plotlyData.length) {
+                const aspect = behavior?.aspect || 1.6;
+                const pxW = 800, pxH = Math.round(800 / aspect);
+                const tmpDiv = document.createElement('div');
+                tmpDiv.style.cssText = `position:fixed;left:-9999px;width:${pxW}px;height:${pxH}px`;
+                document.body.appendChild(tmpDiv);
+                try {
+                  await Plotly.newPlot(tmpDiv, plotlyData, {
+                    ...plotlyLayout, width: pxW, height: pxH,
+                    paper_bgcolor: '#ffffff', plot_bgcolor: '#ffffff',
+                    font: { color: '#333333' },
+                  });
+                  const imgUrl = await Plotly.toImage(tmpDiv, { format: 'png', width: pxW, height: pxH });
+                  Plotly.purge(tmpDiv);
+                  exportSpec.sections[i] = { type: 'image', data: imgUrl };
+                } catch (err) {
+                  console.warn('[DOCX] Embed graphic conversion failed:', err);
+                } finally {
+                  tmpDiv.remove();
+                }
+              }
+            } else if (mode === 'table') {
+              // Table embed → native table section
+              const headers = srcData.headers || srcData.columns || [];
+              const colLabels = headers.map(h => typeof h === 'object' ? (h.label || h.key || '') : String(h));
+              const colKeys = headers.map(h => typeof h === 'object' ? (h.key || h.label || '') : String(h));
+              const rows = (srcData.rows || []).map(r => {
+                if (Array.isArray(r)) return r;
+                if (typeof r === 'object') return colKeys.map(k => r[k] ?? '');
+                return [r];
+              });
+              exportSpec.sections[i] = { type: 'table', headers: colLabels, rows };
+            } else if (mode === 'text' && srcData.sections) {
+              // Text embed → splice in the sub-document's sections
+              const subSections = srcData.sections.map(sub => ({ ...sub }));
+              exportSpec.sections.splice(i, 1, ...subSections);
+              i += subSections.length - 1; // adjust index
+            }
+            continue;
+          }
+          // ── Legacy chart sections → PNG ──
+          if (s.type === 'chart' && window.Plotly) {
             const chartSrc = s.content && typeof s.content === 'object' && (s.content.data || s.content.layout)
               ? s.content : s;
             const tmpDiv = document.createElement('div');
@@ -2521,6 +2747,9 @@ async function _exportPptxServerSide(spec) {
   const sessionId = cfg.sessionId;
   const apiBase = cfg.wsPath ? cfg.wsPath.replace(/\/ws\/.*/, '') : '/api/llming';
 
+  // Resolve $ref embeds (chart, table) before export
+  _resolvePptxEmbeds(spec);
+
   // Pre-render charts to base64 PNGs (handles both elements[] and placeholders{})
   const chartImages = {};
   let chartIdx = 0;
@@ -2917,7 +3146,7 @@ function _openPlotlyLightbox(chartSpec, blockId) {
     font: { color: '#e5e7eb', ...(baseLayout.font || {}) },
     xaxis: { ...(baseLayout.xaxis || {}), gridcolor: 'rgba(255,255,255,0.1)', color: '#e5e7eb' },
     yaxis: { ...(baseLayout.yaxis || {}), gridcolor: 'rgba(255,255,255,0.1)', color: '#e5e7eb' },
-    legend: { ...(baseLayout.legend || {}), font: { color: '#e5e7eb' } },
+    legend: { ...(baseLayout.legend || {}), font: { color: '#e5e7eb' }, bgcolor: 'rgba(30,30,40,0.85)' },
   };
   Plotly.newPlot(plotArea, chartSpec.data || [], fullLayout, { responsive: true, displayModeBar: false, scrollZoom: true });
 
@@ -2935,7 +3164,7 @@ function _openPlotlyLightbox(chartSpec, blockId) {
 /* ══════════════════════════════════════════════════════════════
    HTML Sandbox Plugin — renders inline card, opens in Workspace
    ══════════════════════════════════════════════════════════════ */
-function _buildHtmlSrcDoc(title, cssContent, htmlContent, jsContent) {
+function _buildHtmlSrcDoc(title, cssContent, htmlContent, jsContent, vendorScripts) {
   // Inject dark-mode base CSS so iframe content isn't black-on-dark.
   // Placed BEFORE user CSS so it can be overridden.
   const dark = _isDark();
@@ -2955,11 +3184,25 @@ function _buildHtmlSrcDoc(title, cssContent, htmlContent, jsContent) {
       + 'table{border-collapse:collapse;width:100%}th,td{border:1px solid #e5e7eb;padding:6px 10px;text-align:left}'
       + 'th{background:#f9fafb;font-weight:600}'
       + 'img{max-width:100%;height:auto}';
+  // Inject parent's CSS custom properties so MCP authors can use var(--chat-accent) etc.
+  const root = getComputedStyle(document.documentElement);
+  const _themeVarNames = ['--chat-accent','--chat-bg','--chat-surface','--chat-text',
+    '--chat-border','--chat-text-muted','--chat-code-bg','--chat-code-text','--chat-link'];
+  const themeVars = _themeVarNames
+    .map(v => { const val = root.getPropertyValue(v).trim(); return val ? `${v}:${val}` : ''; })
+    .filter(Boolean)
+    .join(';');
+  const themeCSS = themeVars ? `:root{${themeVars}}` : '';
+  // Listen for live theme updates from parent
+  const themeUpdateJS = `window.addEventListener('message',function(e){if(e.data&&e.data.type==='theme_update'){var r=document.documentElement;for(var k in e.data.vars||{})r.style.setProperty(k,e.data.vars[k])}});`;
+  // Vendor library scripts (injected inline since iframe has no network access)
+  const vendorTags = (vendorScripts || []).filter(Boolean).map(s => `<script>${s}<\/script>`).join('\n');
   return `<!DOCTYPE html><html><head><meta charset="utf-8">
     ${title ? `<title>${_escHtml(title)}</title>` : ''}
+    <style>${themeCSS}</style>
     <style>${baseCSS}</style>
     <style>${cssContent}</style></head>
-    <body>${htmlContent}<script>${jsContent}<\/script></body></html>`;
+    <body>${htmlContent}${vendorTags}<script>${themeUpdateJS}${jsContent}<\/script></body></html>`;
 }
 
 const htmlPlugin = {
@@ -2980,7 +3223,16 @@ const htmlPlugin = {
       title = '';
     }
 
-    const srcDoc = _buildHtmlSrcDoc(title, cssContent, htmlContent, jsContent);
+    // Pick up vendor scripts if injected by rich MCP rendering
+    let vendorScripts;
+    try { vendorScripts = JSON.parse(container.dataset.vendorScripts || 'null'); } catch(_) {}
+    // Pick up droplet files if present
+    const dropletFiles = spec?.droplet_files;
+    let dropletFilesJS = '';
+    if (dropletFiles && typeof dropletFiles === 'object') {
+      dropletFilesJS = `window.__droplet_files__=${JSON.stringify(dropletFiles)};`;
+    }
+    const srcDoc = _buildHtmlSrcDoc(title, cssContent, htmlContent, dropletFilesJS + jsContent, vendorScripts);
 
     // ── Inline card (compact, click to open workspace) ──
     const card = document.createElement('div');
@@ -3130,6 +3382,55 @@ function _flattenTableSpec(tSpec) {
 
 const _attachmentExporters = {};
 
+// ── Unified render dispatcher ────────────────────────────────
+// Central function for converting any doc type to a target format.
+// Handles client-side rendering (Plotly→PNG, HTML assembly) and
+// delegates to server for binary formats (DOCX, PPTX, XLSX).
+async function _renderDocTo(docType, spec, targetFormat, options = {}) {
+  const cfg = window.__CHAT_CONFIG__ || {};
+  const sessionId = cfg.sessionId;
+  const apiBase = cfg.wsPath ? cfg.wsPath.replace(/\/ws\/.*/, '') : '/api/llming';
+
+  // ── Client-side: Plotly → PNG ──
+  if (docType === 'plotly' && targetFormat === 'png') {
+    if (!window.Plotly) throw new Error('Plotly not loaded');
+    const tmpDiv = document.createElement('div');
+    tmpDiv.style.cssText = 'position:fixed;left:-9999px;width:800px;height:500px';
+    document.body.appendChild(tmpDiv);
+    try {
+      await Plotly.newPlot(tmpDiv, spec.data || [], {
+        ...(spec.layout || {}), width: 800, height: 500,
+        paper_bgcolor: '#ffffff', plot_bgcolor: '#ffffff',
+        font: { color: '#333333' },
+      });
+      const imgUrl = await Plotly.toImage(tmpDiv, { format: 'png', width: 800, height: 500 });
+      Plotly.purge(tmpDiv);
+      return { data: imgUrl.split(',')[1], content_type: 'image/png' };
+    } finally {
+      tmpDiv.remove();
+    }
+  }
+
+  // ── Client-side: HTML assembly ──
+  if ((docType === 'html' || docType === 'html_sandbox') && targetFormat === 'html') {
+    const html = spec.html || spec.content || JSON.stringify(spec);
+    const b64 = btoa(unescape(encodeURIComponent(html)));
+    return { data: b64, content_type: 'text/html' };
+  }
+
+  // ── Server-side: all binary formats ──
+  const chartImages = options.chartImages || {};
+  const resp = await fetch(`${apiBase}/doc/export/${sessionId}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ spec, type: docType, format: targetFormat, chart_images: chartImages }),
+  });
+  if (!resp.ok) throw new Error(`Export failed (${docType}→${targetFormat}): ` + await resp.text());
+  const blob = await resp.blob();
+  const b64 = await _blobToBase64(blob);
+  return { data: b64, content_type: resp.headers.get('content-type') || 'application/octet-stream', size: blob.size };
+}
+
 // ── Plotly → PNG ────────────────────────────────────────────
 _attachmentExporters['plotly'] = async (entry, attName) => {
   if (!window.Plotly) throw new Error('Plotly not loaded');
@@ -3162,9 +3463,58 @@ _attachmentExporters['table'] = async (entry, attName) => {
   return { name, content_type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', data: b64, size: blob.size };
 };
 
+/** Resolve $ref embed elements in a presentation spec in-place.
+ *  Converts embed→chart (for plotly) and embed→table (for tables)
+ *  so downstream export can render them properly. */
+function _resolvePptxEmbeds(spec) {
+  const store = window.__chatApp?._blockDataStore;
+  if (!store) return;
+  for (const slide of (spec.slides || [])) {
+    const containers = [slide.elements || []];
+    if (slide.placeholders) {
+      for (const [k, v] of Object.entries(slide.placeholders)) {
+        if (Array.isArray(v)) containers.push(v);
+        else if (v && typeof v === 'object' && v.type === 'embed' && v.$ref) {
+          // Single-element placeholder — wrap in temp array, resolve, unwrap
+          const tmp = [v];
+          containers.push(tmp);
+          // After resolution, write back
+          Object.defineProperty(slide.placeholders, k, { value: tmp[0], writable: true, enumerable: true, configurable: true });
+        }
+      }
+    }
+    for (const elems of containers) {
+      for (let i = 0; i < elems.length; i++) {
+        const elem = elems[i];
+        if (elem.type !== 'embed' || !elem.$ref) continue;
+        const entry = store.get(elem.$ref);
+        if (!entry) continue;
+        const behavior = _EMBED_BEHAVIORS[entry.lang];
+        const mode = behavior?.mode || 'graphic';
+        const srcData = entry.data || {};
+        if (mode === 'graphic' && window.Plotly) {
+          elems[i] = { type: 'chart', data: srcData.data || [], layout: srcData.layout || {} };
+        } else if (mode === 'table') {
+          const headers = srcData.headers || srcData.columns || [];
+          const colLabels = headers.map(h => typeof h === 'object' ? (h.label || h.key || '') : String(h));
+          const colKeys = headers.map(h => typeof h === 'object' ? (h.key || h.label || '') : String(h));
+          const rows = (srcData.rows || []).map(r => {
+            if (Array.isArray(r)) return r;
+            if (typeof r === 'object') return colKeys.map(k => r[k] ?? '');
+            return [r];
+          });
+          elems[i] = { type: 'table', headers: colLabels, rows };
+        }
+      }
+    }
+  }
+}
+
 // ── PowerPoint → PPTX ──────────────────────────────────────
 _attachmentExporters['powerpoint'] = async (entry, attName) => {
   const spec = entry.data;
+  // Resolve $ref embeds before export
+  _resolvePptxEmbeds(spec);
   const cfg = window.__CHAT_CONFIG__ || {};
   const sessionId = cfg.sessionId;
   const apiBase = cfg.wsPath ? cfg.wsPath.replace(/\/ws\/.*/, '') : '/api/llming';
@@ -3284,7 +3634,12 @@ const emailDraftPlugin = {
   inline: true,
   render: async (container, rawData, blockId) => {
     const spec = _parseJSON(rawData);
-    if (!spec) { container.textContent = rawData; return; }
+    if (!spec) {
+      console.warn('[email_draft] JSON parse failed, rawData length:', rawData.length,
+        'first 100:', rawData.substring(0, 100));
+      container.textContent = rawData;
+      return;
+    }
 
     // ── Persisted email state + edits (survives reload) ──
     const _stateKey = 'email_state:' + (spec.id || blockId);
@@ -4036,6 +4391,590 @@ const emailDraftPlugin = {
 };
 
 /* ══════════════════════════════════════════════════════════════
+   Rich MCP Plugin — renders stored visualizations by UUID
+   ══════════════════════════════════════════════════════════════ */
+
+/* ── Rich MCP — product number visualization (inline data, no server fetch) ── */
+
+const _RICH_MCP_CSS = `
+* { box-sizing: border-box; margin: 0; padding: 0; }
+.pn-header { font-size: 14px; font-weight: 600; color: var(--chat-text, #e5e7eb); margin-bottom: 12px; }
+.pn-norm { font-size: 11px; color: var(--chat-text-muted, #6b7280); font-weight: 400; margin-left: 8px; }
+.pn-card { border: 1px solid var(--chat-border, rgba(255,255,255,0.10)); border-radius: 10px; padding: 14px; margin-bottom: 10px; }
+.pn-code-strip { display: flex; gap: 2px; margin-bottom: 10px; flex-wrap: wrap; align-items: flex-start; }
+.pn-seg { display: flex; flex-direction: column; align-items: center; }
+.pn-seg-val { font-family: 'SF Mono', Monaco, Consolas, monospace; font-size: 20px; font-weight: 700;
+  padding: 5px 9px; border-radius: 6px; letter-spacing: 0.5px; min-width: 32px; text-align: center; }
+.pn-seg-label { font-size: 9px; color: var(--chat-text-muted, #6b7280); margin-top: 2px; text-transform: uppercase;
+  letter-spacing: 0.05em; text-align: center; max-width: 70px; }
+.pn-dot { font-size: 20px; color: var(--chat-text-muted, #6b7280); align-self: flex-start; padding-top: 5px; font-weight: 700; }
+.pn-seg-0 .pn-seg-val { background: rgba(99,102,241,0.12); color: #6366f1; }
+.pn-seg-1 .pn-seg-val { background: rgba(236,72,153,0.12); color: #ec4899; }
+.pn-seg-2 .pn-seg-val { background: rgba(34,197,94,0.12); color: #16a34a; }
+.pn-seg-3 .pn-seg-val { background: rgba(245,158,11,0.12); color: #d97706; }
+.pn-seg-4 .pn-seg-val { background: rgba(139,92,246,0.12); color: #8b5cf6; }
+.pn-seg-5 .pn-seg-val { background: rgba(99,102,241,0.08); color: var(--chat-text-muted, #6b7280); }
+.pn-meta { display: flex; flex-direction: column; gap: 2px; margin-top: 8px; font-size: 11px; color: var(--chat-text-muted, #6b7280); }
+.pn-meta-item { display: flex; align-items: center; gap: 4px; }
+.pn-meta-label { font-weight: 600; color: var(--chat-text, #e5e7eb); }
+.pn-ordering { font-family: 'SF Mono', Monaco, Consolas, monospace; font-size: 13px; color: var(--chat-text, #e5e7eb);
+  background: rgba(99,102,241,0.06); padding: 6px 12px; border-radius: 6px; margin-top: 8px; display: inline-block; }
+.pn-ordering-label { font-size: 10px; color: var(--chat-text-muted, #6b7280); text-transform: uppercase;
+  letter-spacing: 0.05em; margin-top: 8px; margin-bottom: 2px; }
+.pn-steps { margin-top: 10px; border-top: 1px solid var(--chat-border, rgba(255,255,255,0.10)); padding-top: 8px; }
+.pn-step { font-size: 11px; color: var(--chat-text-muted, #6b7280); padding: 2px 0; }
+.pn-step-label { font-weight: 600; color: var(--chat-text, #e5e7eb); }
+`;
+
+/** Parse formatted product number (XXX.XXX.XX.XX.XX.X) into display segments. */
+function _segmentProductNumber(formatted) {
+  const SEGS = [
+    { len: 3, label: 'Series' }, { len: 3, label: 'Performance' },
+    { len: 2, label: 'Material' }, { len: 2, label: 'Connection' },
+    { len: 2, label: 'Component' }, { len: 1, label: 'Index' },
+  ];
+  const chars = (formatted || '').replace(/\./g, '').split('');
+  const out = [];
+  let pos = 0;
+  for (const seg of SEGS) {
+    const val = chars.slice(pos, pos + seg.len).join('');
+    if (val) out.push({ value: val, label: seg.label });
+    pos += seg.len;
+  }
+  return out;
+}
+
+/** Build product number HTML from structured data and render in a sandboxed iframe. */
+function _renderProductNumber(container, spec) {
+  const e = (s) => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const segments = _segmentProductNumber(spec.formatted);
+  const info = spec.info || {};
+  const steps = spec.steps || [];
+  const ordering = spec.ordering || '';
+  const title = spec.title || 'Product Number';
+  const norm = spec.norm || '';
+
+  let body = `<div class="pn-header">${e(title)}<span class="pn-norm">${e(norm)}</span></div>`;
+  body += '<div class="pn-card">';
+
+  // Code strip
+  body += '<div class="pn-code-strip">';
+  segments.forEach((seg, i) => {
+    if (i > 0) body += '<span class="pn-dot">.</span>';
+    body += `<div class="pn-seg pn-seg-${Math.min(i, 5)}">`;
+    body += `<span class="pn-seg-val">${e(seg.value)}</span>`;
+    body += `<span class="pn-seg-label">${e(seg.label)}</span>`;
+    body += '</div>';
+  });
+  body += '</div>';
+
+  // Info metadata — only show if no resolution steps (steps have more detail)
+  const infoKeys = Object.keys(info);
+  if (infoKeys.length > 0 && steps.length === 0) {
+    body += '<div class="pn-meta">';
+    infoKeys.forEach(k => {
+      const v = info[k];
+      if (v && v !== 'N/A') {
+        const label = k.replace(/([A-Z])/g, ' $1').replace(/^./, s => s.toUpperCase());
+        body += `<span class="pn-meta-item"><span class="pn-meta-label">${e(label)}:</span> ${e(v)}</span>`;
+      }
+    });
+    body += '</div>';
+  }
+
+  // Ordering number
+  if (ordering) {
+    body += '<div class="pn-ordering-label">Ordering Number</div>';
+    body += `<div class="pn-ordering">${e(ordering)}</div>`;
+  }
+
+  // Resolution steps
+  if (steps.length > 0) {
+    body += '<div class="pn-steps">';
+    steps.forEach(s => {
+      const note = s.note || '';
+      const from = s.from != null ? ` (from: ${e(s.from)})` : '';
+      body += `<div class="pn-step"><span class="pn-step-label">${e(s.step)}:</span> ${e(s.resolved || s.resolvedRate || '')}${from}${note ? ' \u2014 ' + e(note) : ''}</div>`;
+    });
+    body += '</div>';
+  }
+  body += '</div>';
+
+  // Inject theme CSS vars from parent
+  const themeEl = document.getElementById('chat-app') || document.documentElement;
+  const root = getComputedStyle(themeEl);
+  const varNames = ['--chat-accent','--chat-bg','--chat-surface','--chat-text',
+    '--chat-border','--chat-text-muted','--chat-code-bg','--chat-code-text','--chat-link'];
+  const themeVars = varNames.map(v => { const val = root.getPropertyValue(v).trim(); return val ? `${v}:${val}` : ''; }).filter(Boolean).join(';');
+  const themeCSS = themeVars ? `:root{${themeVars}}` : '';
+
+  const resizeJS = `function _rh(){var h=Math.ceil(document.body.getBoundingClientRect().height);window.parent.postMessage({type:'resize',height:h},'*');}new ResizeObserver(_rh).observe(document.body);_rh();`;
+  const themeUpdateJS = `window.addEventListener('message',function(e){if(e.data&&e.data.type==='theme_update'){var r=document.documentElement;for(var k in e.data.vars||{})r.style.setProperty(k,e.data.vars[k])}});`;
+
+  const srcDoc = `<!DOCTYPE html><html><head><meta charset="utf-8"><style>${themeCSS}</style><style>html,body{font-family:system-ui,-apple-system,sans-serif;background:transparent;margin:0;padding:16px;overflow:hidden}</style><style>${_RICH_MCP_CSS}</style></head><body>${body}<script>${themeUpdateJS}${resizeJS}<\/script></body></html>`;
+
+  const iframe = document.createElement('iframe');
+  iframe.sandbox = 'allow-scripts';
+  iframe.srcdoc = srcDoc;
+  iframe.style.cssText = 'width:100%;border:none;border-radius:8px;overflow:hidden;min-height:60px;';
+  iframe.title = title;
+  window.addEventListener('message', function onMsg(ev) {
+    if (ev.source === iframe.contentWindow && ev.data?.type === 'resize' && typeof ev.data.height === 'number') {
+      iframe.style.height = Math.min(ev.data.height + 2, 800) + 'px';
+    }
+  });
+  container.appendChild(iframe);
+}
+
+/** Vendor lib cache + resolver for rich_mcp sandbox iframes. */
+const _richMcpVendorCache = {};
+const _RICH_MCP_VENDOR_LIBS = {
+  plotly: '/chat-static/vendor/plotly.min.js',
+  katex_js: '/chat-static/vendor/katex.min.js',
+  katex_css: '/chat-static/vendor/katex.min.css',
+};
+
+/** Download a Plotly chart as PNG in light mode at 1024px width. */
+async function _downloadPlotlyPng(plotlySpec, title) {
+  if (!window.Plotly) return;
+  // Create an offscreen div for rendering
+  const offscreen = document.createElement('div');
+  offscreen.style.cssText = 'position:fixed;left:-9999px;top:0;width:1024px;height:640px;';
+  document.body.appendChild(offscreen);
+  try {
+    const lightText = '#374151';
+    const lightGrid = 'rgba(0,0,0,0.08)';
+    const layout = { ...(plotlySpec.layout || {}), autosize: true, width: 1024, height: 640,
+      paper_bgcolor: '#ffffff', plot_bgcolor: '#ffffff',
+      margin: { l: 60, r: 30, t: 50, b: 60, ...(plotlySpec.layout?.margin || {}) },
+      font: { color: lightText, family: 'system-ui,-apple-system,sans-serif', size: 13 },
+    };
+    if (layout.title) layout.title = { ...layout.title, font: { ...(layout.title.font || {}), color: '#111827' } };
+    ['xaxis', 'yaxis'].forEach(a => { if (layout[a]) layout[a] = { ...layout[a], color: lightText, gridcolor: lightGrid }; });
+    if (layout.scene) ['xaxis','yaxis','zaxis'].forEach(a => { if (layout.scene[a]) layout.scene[a] = { ...layout.scene[a], color: lightText, gridcolor: lightGrid }; });
+    await Plotly.newPlot(offscreen, plotlySpec.data || [], layout, { displayModeBar: false });
+    const dataUrl = await Plotly.toImage(offscreen, { format: 'png', width: 1024, height: 640, scale: 2 });
+    const a = document.createElement('a');
+    a.href = dataUrl;
+    a.download = (title || 'chart').replace(/[^a-zA-Z0-9_\-() ]/g, '_') + '.png';
+    a.click();
+  } finally {
+    Plotly.purge(offscreen);
+    offscreen.remove();
+  }
+}
+
+async function _resolveRichMcpVendorLibs(libKeys) {
+  const results = {};
+  await Promise.all(libKeys.map(async (key) => {
+    if (_richMcpVendorCache[key]) { results[key] = _richMcpVendorCache[key]; return; }
+    const path = _RICH_MCP_VENDOR_LIBS[key];
+    if (!path) return;
+    try {
+      const resp = await fetch(path);
+      if (!resp.ok) { console.warn('[RICH_MCP] Vendor lib 404:', key, path); return; }
+      const text = await resp.text();
+      _richMcpVendorCache[key] = text;
+      results[key] = text;
+    } catch (err) { console.warn('[RICH_MCP] Vendor lib fetch failed:', key, err); }
+  }));
+  return results;
+}
+
+/** Build and render a math_result from data-only envelope. All HTML/CSS/JS is generated here. */
+function _mathResultIframe(container, render, vendorScripts) {
+  const title = render.title || '';
+  const latex = render.latex || '';
+  const resultText = render.result_text || '';
+  const steps = render.steps || [];
+  const extraInfo = render.extra_info || {};
+  const hasCard = !!(latex || resultText || steps.length || Object.keys(extraInfo).length);
+  // Detect dark mode from parent page (cv2-dark class), not OS prefers-color-scheme
+  const isDark = !!document.querySelector('#chat-app.cv2-dark');
+
+  // --- Build HTML ---
+  let html = '<div id="math-result"></div>';
+
+  // --- Build CSS (always from scratch — never stored) ---
+  const css = `
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { padding: 12px 16px; font-family: system-ui, -apple-system, sans-serif; color: ${isDark ? '#e5e7eb' : '#1f2937'}; }
+.math-header { font-size: 14px; font-weight: 600; margin-bottom: 12px; }
+.math-card { border: 1px solid rgba(128,128,128,0.2); border-radius: 10px; padding: 16px; background: rgba(128,128,128,0.05); }
+.math-latex { font-size: 16px; margin: 8px 0; padding: 12px; background: rgba(99,102,241,0.06); border-radius: 8px; text-align: center; overflow-x: auto; }
+.math-result-text { font-family: 'SF Mono', Monaco, Consolas, monospace; font-size: 13px; padding: 8px 12px; background: rgba(34,197,94,0.08); border-radius: 6px; margin: 8px 0; white-space: pre-wrap; word-break: break-word; }
+.math-steps { margin-top: 12px; border-top: 1px solid rgba(128,128,128,0.2); padding-top: 10px; }
+.math-steps-title { font-size: 12px; font-weight: 600; opacity: 0.6; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 8px; }
+.math-step { display: flex; gap: 10px; margin-bottom: 8px; }
+.math-step-num { flex-shrink: 0; width: 22px; height: 22px; border-radius: 50%; background: rgba(99,102,241,0.15); color: #818cf8; font-size: 11px; font-weight: 700; display: flex; align-items: center; justify-content: center; margin-top: 2px; }
+.math-step-content { flex: 1; }
+.math-step-title { font-size: 12px; font-weight: 600; }
+.math-step-expr { font-size: 14px; margin: 4px 0; overflow-x: auto; }
+.math-step-note { font-size: 11px; opacity: 0.6; }
+.math-info { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 10px; font-size: 11px; opacity: 0.6; border-top: 1px solid rgba(128,128,128,0.2); padding-top: 8px; }
+.math-info-item { display: flex; align-items: center; gap: 4px; }
+.math-info-label { font-weight: 600; }
+`;
+
+  // --- Build JS from data ---
+  const esc = (s) => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  let js = 'var c=document.getElementById("math-result"),h="";';
+  if (hasCard) {
+    js += `h+='<div class="math-header">${esc(title)}</div>';`;
+    js += `h+='<div class="math-card">';`;
+    if (latex) js += `h+='<div class="math-latex">$$${esc(latex)}$$</div>';`;
+    if (resultText) js += `h+='<div class="math-result-text">${esc(resultText)}</div>';`;
+    if (steps.length) {
+      js += `h+='<div class="math-steps"><div class="math-steps-title">Step-by-step solution</div>';`;
+      steps.forEach((s, i) => {
+        js += `h+='<div class="math-step"><span class="math-step-num">${i+1}</span><div class="math-step-content">`;
+        js += `<div class="math-step-title">${esc(s.title || 'Step '+(i+1))}</div>`;
+        if (s.latex) js += `<div class="math-step-expr">$$${esc(s.latex)}$$</div>`;
+        if (s.note) js += `<div class="math-step-note">${esc(s.note)}</div>`;
+        js += `</div></div>';`;
+      });
+      js += `h+='</div>';`;
+    }
+    const infoKeys = Object.keys(extraInfo);
+    if (infoKeys.length) {
+      js += `h+='<div class="math-info">`;
+      infoKeys.forEach(k => { js += `<span class="math-info-item"><span class="math-info-label">${esc(k)}:</span> ${esc(extraInfo[k])}</span>`; });
+      js += `</div>';`;
+    }
+    js += `h+='</div>';`;
+  }
+  js += 'c.innerHTML=h;';
+
+  // KaTeX auto-render
+  if (vendorScripts.katex_js) {
+    js += `
+document.querySelectorAll('.math-latex,.math-step-expr').forEach(function(el){
+  var t=el.innerHTML;
+  t=t.replace(/\\$\\$([^$]+)\\$\\$/g,function(_,e){try{return katex.renderToString(e.trim(),{displayMode:true,throwOnError:false})}catch(x){return e}});
+  t=t.replace(/\\$([^$]+)\\$/g,function(_,e){try{return katex.renderToString(e.trim(),{displayMode:false,throwOnError:false})}catch(x){return e}});
+  el.innerHTML=t;
+});`;
+  }
+
+  // Resize observer
+  js += `function _rh(){var h=Math.ceil(document.body.getBoundingClientRect().height);window.parent.postMessage({type:'resize',height:h},'*')}new ResizeObserver(_rh).observe(document.body);_rh();`;
+
+  // Vendor block (KaTeX only — plots go through document plugin now)
+  let vendorBlock = '';
+  if (vendorScripts.katex_css) vendorBlock += `<style>${vendorScripts.katex_css}</style>`;
+  if (vendorScripts.katex_js) vendorBlock += `<script>${vendorScripts.katex_js}<\/script>`;
+
+  const srcDoc = `<!DOCTYPE html><html><head><meta charset="utf-8">${vendorBlock}<style>${css}</style></head><body>${html}<script>${js}<\/script></body></html>`;
+  const iframe = document.createElement('iframe');
+  iframe.sandbox = 'allow-scripts';
+  iframe.srcdoc = srcDoc;
+  iframe.style.cssText = 'width:100%;border:none;border-radius:8px;overflow:hidden;min-height:60px;';
+  iframe.title = title;
+  window.addEventListener('message', function onMsg(e) {
+    if (e.source === iframe.contentWindow && e.data?.type === 'resize' && typeof e.data.height === 'number') {
+      if (iframe.dataset.fillParent) return; // Skip auto-resize in windowed mode
+      iframe.style.height = Math.min(e.data.height + 2, 800) + 'px';
+    }
+  });
+  container.appendChild(iframe);
+}
+
+/** Render html_sandbox rich_mcp in a sandboxed iframe with vendor libs. */
+function _richMcpSandboxIframe(container, render, vendorScripts, title) {
+  const htmlContent = render.html || '';
+  const cssContent = render.css || '';
+  const jsContent = render.js || '';
+
+  // Inject vendor scripts
+  let vendorBlock = '';
+  if (vendorScripts.plotly) vendorBlock += `<script>${vendorScripts.plotly}<\/script>`;
+  if (vendorScripts.katex_css) vendorBlock += `<style>${vendorScripts.katex_css}</style>`;
+  if (vendorScripts.katex_js) vendorBlock += `<script>${vendorScripts.katex_js}<\/script>`;
+
+  // KaTeX auto-render: process $$...$$ and $...$ after DOM loads
+  const katexAutoRender = vendorScripts.katex_js ? `
+    function _autoRenderKatex(){
+      document.querySelectorAll('.math-latex,.math-step-expr').forEach(function(el){
+        var html=el.innerHTML;
+        html=html.replace(/\\$\\$([^$]+)\\$\\$/g,function(_,expr){
+          try{return katex.renderToString(expr.trim(),{displayMode:true,throwOnError:false});}catch(e){return expr;}
+        });
+        html=html.replace(/\\$([^$]+)\\$/g,function(_,expr){
+          try{return katex.renderToString(expr.trim(),{displayMode:false,throwOnError:false});}catch(e){return expr;}
+        });
+        el.innerHTML=html;
+      });
+    }
+  ` : 'function _autoRenderKatex(){}';
+
+  const resizeJS = `function _rh(){var h=Math.ceil(document.body.getBoundingClientRect().height);window.parent.postMessage({type:'resize',height:h},'*')}new ResizeObserver(_rh).observe(document.body);_rh();`;
+
+  const srcDoc = `<!DOCTYPE html><html><head><meta charset="utf-8">${vendorBlock}<style>html,body{font-family:system-ui,-apple-system,sans-serif;color:var(--chat-text,#1f2937);background:transparent;margin:0;padding:0;}</style><style>${cssContent}</style></head><body>${htmlContent}<script>${katexAutoRender}${jsContent};_autoRenderKatex();${resizeJS}<\/script></body></html>`;
+
+  const iframe = document.createElement('iframe');
+  iframe.sandbox = 'allow-scripts';
+  iframe.srcdoc = srcDoc;
+  iframe.style.cssText = 'width:100%;border:none;border-radius:8px;overflow:hidden;min-height:60px;';
+  iframe.title = title;
+  window.addEventListener('message', function onMsg(e) {
+    if (e.source === iframe.contentWindow && e.data?.type === 'resize' && typeof e.data.height === 'number') {
+      if (iframe.dataset.fillParent) return;
+      iframe.style.height = Math.min(e.data.height + 2, 800) + 'px';
+    }
+  });
+  container.appendChild(iframe);
+}
+
+/** Render a rich_mcp block as a compact inline card with click-to-expand. */
+async function _richMcpRenderCard(container, spec, rawData, blockId) {
+  const renderType = spec.render?.type;
+  const title = spec.render?.title || spec.title || 'Visualization';
+
+  // Register in blockDataStore so windowed preview can access it
+  const chatApp = window.__chatApp;
+  const docId = spec.id || blockId;
+  if (chatApp?._blockDataStore) {
+    chatApp._blockDataStore.register(docId, 'rich_mcp', spec);
+  }
+
+  container.classList.add('cv2-rich-mcp-container');
+  container.dataset.name = title;
+
+  // Compact inline preview with iframe
+  const preview = document.createElement('div');
+  preview.className = 'cv2-rich-mcp-preview';
+  container.appendChild(preview);
+
+  // Render the iframe into the preview area
+  try {
+    if (renderType === 'math_result') {
+      const vendorScripts = await _resolveRichMcpVendorLibs(['katex_js', 'katex_css']);
+      _mathResultIframe(preview, spec.render, vendorScripts);
+    } else if (renderType === 'html_sandbox') {
+      const vendorLibs = spec.render.vendor_libs || [];
+      const vendorScripts = await _resolveRichMcpVendorLibs(vendorLibs);
+      _richMcpSandboxIframe(preview, spec.render, vendorScripts, title);
+    }
+  } catch (err) {
+    console.warn('[RICH_MCP] Inline render failed:', err);
+    preview.innerHTML = `<div style="color:var(--chat-text-muted,#6b7280);padding:8px;font-size:12px">${_escHtml(err.message)}</div>`;
+  }
+
+  // Maximize overlay (bottom-right)
+  const hint = document.createElement('div');
+  hint.className = 'cv2-rich-mcp-expand-hint';
+  hint.innerHTML = '<span class="material-icons">open_in_full</span>';
+  container.appendChild(hint);
+
+  // Toolbar
+  const toolbar = document.createElement('div');
+  toolbar.className = 'cv2-doc-plugin-export';
+  // Download PNG button (plotly charts only — legacy conversations with embedded plotly data)
+  if (spec.render?.plotly) {
+    const dlBtn = document.createElement('button');
+    dlBtn.className = 'cv2-doc-export-btn';
+    dlBtn.title = 'Download PNG';
+    dlBtn.innerHTML = '<span class="material-icons" style="font-size:14px;vertical-align:middle">download</span>';
+    dlBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      _downloadPlotlyPng(spec.render.plotly, title);
+    });
+    toolbar.appendChild(dlBtn);
+  }
+  _addSourceButton(toolbar, rawData);
+  container.appendChild(toolbar);
+
+  // Click handlers
+  function openWindowed() { _showDocWindowed(blockId); }
+  preview.style.cursor = 'pointer';
+  preview.addEventListener('click', openWindowed);
+  hint.addEventListener('click', openWindowed);
+}
+
+const richMcpPlugin = {
+  inline: true,
+  sidebar: false,
+  render: async (container, rawData, blockId) => {
+    const spec = _parseJSON(rawData);
+    if (!spec) {
+      container.innerHTML = '<div style="color:#888;padding:8px">Invalid rich_mcp block</div>';
+      return;
+    }
+
+    // v2: inline structured data — render directly (no windowing for small cards)
+    if (spec.type === 'product_number' && spec.formatted) {
+      _renderProductNumber(container, spec);
+      return;
+    }
+
+    // v4: math_result — compact card with click-to-window
+    if (spec.render && spec.render.type === 'math_result') {
+      await _richMcpRenderCard(container, spec, rawData, blockId);
+      return;
+    }
+
+    // v3: html_sandbox — compact card with click-to-window
+    if (spec.render && spec.render.type === 'html_sandbox') {
+      await _richMcpRenderCard(container, spec, rawData, blockId);
+      return;
+    }
+
+    // Legacy v1: UUID-based server fetch (backward compat for old conversations)
+    if (spec.uuid) {
+      const title = spec.title || 'Visualization';
+      container.innerHTML = `<div class="cv2-doc-plugin-streaming"><div class="cv2-spinner-dots"><span></span><span></span><span></span></div><span class="cv2-doc-plugin-streaming-name">${_escHtml(title)}</span></div>`;
+      const url = `/api/llming/rich-render/${encodeURIComponent(spec.uuid)}`;
+      try {
+        const resp = await fetch(url);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const renderSpec = await resp.json();
+        container.innerHTML = '';
+        _richMcpLegacyIframe(container, renderSpec, title);
+      } catch (err) {
+        console.warn('[RICH_MCP] Legacy fetch failed:', err);
+        container.innerHTML = `<div style="color:var(--chat-text-muted,#6b7280);padding:8px;font-size:12px;opacity:0.7">Visualization no longer available</div>`;
+      }
+      return;
+    }
+
+    container.innerHTML = '<div style="color:#888;padding:8px">Unknown rich_mcp format</div>';
+  },
+};
+
+/** Legacy iframe renderer for old v1 conversations that stored HTML/CSS/JS on server. */
+function _richMcpLegacyIframe(container, renderSpec, title) {
+  const htmlContent = renderSpec.html || '';
+  const cssContent = renderSpec.css || '';
+  const jsContent = renderSpec.js || '';
+  const resizeJS = `function _rh(){var h=Math.ceil(document.body.getBoundingClientRect().height);window.parent.postMessage({type:'resize',height:h},'*')}new ResizeObserver(_rh).observe(document.body);_rh();`;
+  const srcDoc = `<!DOCTYPE html><html><head><meta charset="utf-8"><style>html,body{font-family:system-ui,-apple-system,sans-serif;color:#e5e7eb;background:transparent;margin:0;padding:0}</style><style>${cssContent}</style></head><body>${htmlContent}<script>${jsContent}${resizeJS}<\/script></body></html>`;
+  const iframe = document.createElement('iframe');
+  iframe.sandbox = 'allow-scripts';
+  iframe.srcdoc = srcDoc;
+  iframe.style.cssText = 'width:100%;border:none;border-radius:8px;overflow:hidden;min-height:60px;';
+  iframe.title = title;
+  window.addEventListener('message', function onMsg(e) {
+    if (e.source === iframe.contentWindow && e.data?.type === 'resize' && typeof e.data.height === 'number') {
+      iframe.style.height = Math.min(e.data.height + 2, 800) + 'px';
+    }
+  });
+  container.appendChild(iframe);
+}
+
+
+/* ══════════════════════════════════════════════════════════════
+   Kantini Result Plugin — renders canteen meal cards inline
+   ══════════════════════════════════════════════════════════════ */
+
+const kantiniResultPlugin = {
+  inline: true,
+  sidebar: false,
+  render: async (container, rawData, blockId) => {
+    const spec = _parseJSON(rawData);
+    if (!spec) { container.textContent = rawData; return; }
+
+    const scope = spec.scope || 'today';
+
+    // Week mode → open viewer popup immediately, no inline rendering
+    if (scope === 'week') {
+      const app = window.__chatApp;
+      if (app && typeof openMenuViewer === 'function') {
+        openMenuViewer(app, {
+          meals: spec.all_meals || spec.meals,
+          week_label: spec.week_label,
+          location: spec.location,
+        });
+      } else if (app && app.appExtActivate) {
+        app._appExtBoltMode = 'viewer';
+        app.appExtActivate('kantini');
+      }
+      container.innerHTML = `<div style="padding:12px;color:#6b7280;font-size:12px;font-style:italic">📋 ${spec.week_label || 'Wochenplan'} wird angezeigt…</div>`;
+      return;
+    }
+
+    // Day mode → render inline meal cards with KW dropdown
+    const meals = spec.meals || [];
+    const noMenu = spec.no_menu || !meals.length;
+    const dayLabel = meals.length ? meals[0].day : '';
+    const _tagIcons = { beef: '🐄', pork: '🐖', poultry: '🐔', fish: '🐟', vegan: '🌱', vegetarian: '🥬', lamb: '🐑' };
+
+    // Build KW dropdown (always show current + next 2 weeks)
+    const weeks = spec.available_weeks || [];
+    const currentKW = spec.week_number || 0;
+    const currentYear = spec.year || 0;
+    let kwDropdown = '';
+    if (weeks.length) {
+      const opts = weeks.map(w => {
+        const sel = w.year === currentYear && w.week_number === currentKW ? ' selected' : '';
+        const df = (w.date_from || '').replace(/^\d{4}-/, '').replace(/-/g, '.');
+        const dt = (w.date_to || '').replace(/^\d{4}-/, '').replace(/-/g, '.');
+        const dateHint = df ? ` (${df} – ${dt})` : '';
+        return `<option value="${w.year}-${w.week_number}"${sel}>KW${w.week_number}${dateHint}</option>`;
+      }).join('');
+      kwDropdown = `<select class="kvi-kw-select">${opts}</select>`;
+    } else {
+      kwDropdown = `<span class="kvi-subtitle">${spec.week_label || ''}</span>`;
+    }
+
+    const locLabel = (spec.location || 'Metzingen').charAt(0).toUpperCase() + (spec.location || '').slice(1);
+    let html = `<div class="kvi-container">`;
+    html += `<div class="kvi-header"><span class="kvi-icon">🍽️</span>`;
+    if (dayLabel) html += `<span class="kvi-title">${dayLabel}</span>`;
+    html += `${kwDropdown}<span class="kvi-subtitle">${locLabel}</span></div>`;
+
+    if (noMenu) {
+      html += '<div class="kvi-no-menu">Kein Speiseplan für diese Woche verfügbar</div>';
+    } else {
+      html += '<div class="kvi-meals">';
+      for (const m of meals) {
+        const n = { kcal: m.kcal, carbs: m.carbs_g, protein: m.protein_g, fat: m.fat_g };
+        const tagHtml = (m.tags || []).map(t => _tagIcons[t] ? `<span class="kvi-tag">${_tagIcons[t]}</span>` : '').join('');
+
+        html += '<div class="kvi-meal">';
+        if (m.image_url) {
+          html += `<div class="kvi-img"><img src="${m.image_url}" loading="lazy">${m.image_is_ai ? '<i class="kvi-ai">AI</i>' : ''}${m.bio ? '<i class="kvi-bio">🌱</i>' : ''}</div>`;
+        }
+        html += '<div class="kvi-info">';
+        html += `<div class="kvi-type">${m.menu_type || ''}</div>`;
+        html += `<div class="kvi-name">${m.name}</div>`;
+        if (m.description && m.description !== m.name) html += `<div class="kvi-desc">${m.description}</div>`;
+        let meta = '';
+        if (n.kcal) meta += `<span class="kvi-kcal">${n.kcal} kcal</span>`;
+        if (tagHtml) meta += tagHtml;
+        if (m.bio) meta += '<span class="kvi-tag kvi-tag-bio">BIO</span>';
+        if (m.allergens) meta += `<span class="kvi-allergens" title="Allergene: ${m.allergens}">[${m.allergens}]</span>`;
+        if (meta) html += `<div class="kvi-meta">${meta}</div>`;
+        const total = (n.carbs || 0) + (n.protein || 0) + (n.fat || 0);
+        if (total > 0) {
+          const cP = Math.round((n.carbs / total) * 100);
+          const pP = Math.round((n.protein / total) * 100);
+          html += `<div class="kvi-nutri-bar"><div style="width:${cP}%;background:#f59e0b"></div><div style="width:${pP}%;background:#ef4444"></div><div style="width:${100-cP-pP}%;background:#3b82f6"></div></div>`;
+        }
+        html += '</div></div>';
+      }
+      html += '</div>';
+    }
+    html += '</div>';
+    container.innerHTML = html;
+
+    // Bind KW dropdown → send message asking for that week
+    const select = container.querySelector('.kvi-kw-select');
+    if (select) {
+      select.addEventListener('change', (e) => {
+        const [y, w] = e.target.value.split('-').map(Number);
+        const app = window.__chatApp;
+        if (!app) return;
+        app.el.textarea.value = `Was gibt es in KW${w} zu essen?`;
+        app.el.textarea.dispatchEvent(new Event('input'));
+        // Auto-submit
+        const sendBtn = document.getElementById('cv2-send-btn');
+        if (sendBtn) sendBtn.click();
+      });
+    }
+  },
+};
+
+/* ══════════════════════════════════════════════════════════════
    Registration
    ══════════════════════════════════════════════════════════════ */
 
@@ -4051,9 +4990,14 @@ function registerBuiltinPlugins(registry) {
   registry.register('html_sandbox', htmlPlugin);
   registry.register('email_draft', emailDraftPlugin);
   registry.register('mermaid', mermaidPlugin);
+  registry.register('rich_mcp', richMcpPlugin);
+  registry.register('kantini_result', kantiniResultPlugin);
+  // Follow-up questions (loaded from chat-followup.js)
+  if (window._followupPlugin) registry.register('followup', window._followupPlugin);
 }
 
 window.registerBuiltinPlugins = registerBuiltinPlugins;
+window._renderProductNumberCard = _renderProductNumber;
 
 /* ══════════════════════════════════════════════════════════════
    Debug Document API — exposes doc operations for programmatic

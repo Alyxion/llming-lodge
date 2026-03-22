@@ -9,7 +9,7 @@ import importlib
 import logging
 from typing import List, Optional
 
-from llming_lodge.tools.mcp.config import MCPServerConfig
+from llming_models.tools.mcp.config import MCPServerConfig
 from llming_lodge.doc_plugins.document_store import DocumentSessionStore
 from llming_lodge.doc_plugins.creator_mcp import DocumentCreatorMCP
 
@@ -154,7 +154,18 @@ class DocPluginManager:
         lines.append(
             "Always prefer these fenced code blocks for inline rendering. "
             "Use the create_document tool only when the user explicitly asks for a persistent "
-            "document they can manage separately."
+            "document they can manage separately.\n\n"
+            "**CRITICAL**: The content inside fenced code blocks MUST be valid JSON. "
+            "Escape all double quotes inside string values with `\\\"`. "
+            "For example, `body_html` containing `<b>\"title\"</b>` must be written as "
+            "`\"body_html\": \"<b>\\\"title\\\"</b>\"`."
+        )
+        lines.append(
+            "\n### Data Reuse (IMPORTANT)\n"
+            "When the user asks to transform data you already have (e.g. 'put this in a table', "
+            "'show as chart', 'export as table'), **reuse the data from previous tool results** "
+            "in this conversation. Do NOT re-query databases or call data-fetching tools for "
+            "data that is already present in the conversation history from earlier tool calls."
         )
         lines.append(
             "\n### Document Identity & Updates\n"
@@ -179,6 +190,29 @@ class DocPluginManager:
             "presentation slide element as `{\"type\": \"chart\", \"$ref\": \"<uuid>\"}`.\n"
             "Rules: only reference blocks that appear earlier in the conversation; "
             "do not create circular references."
+        )
+        lines.append(
+            "\n### Embedding Documents in Text Documents (CRITICAL)\n"
+            "When the user asks to include/add/embed a chart, table, or any other document "
+            "in a text document (Word/DOCX), **always use an embed section** referencing "
+            "the document by its ID. **Never** fetch or duplicate the data.\n"
+            "\nUse `text_doc_add_section` with:\n"
+            "- `type`: `\"embed\"`\n"
+            "- `ref`: `\"<document-id>\"`  (the ID of the plotly chart, table, etc.)\n"
+            "\nExample: to add a plotly chart (id `abc123`) to a Word document:\n"
+            "```json\n"
+            "text_doc_add_section(document_id=\"word-doc-id\", type=\"embed\", ref=\"abc123\")\n"
+            "```\n"
+            "On export, embeds are automatically converted:\n"
+            "- Charts/plots → PNG image\n"
+            "- Tables → native Word table\n"
+            "- Text documents → inlined sections\n"
+            "\nThe same `embed` section works in fenced ```text_doc blocks:\n"
+            "```json\n"
+            "{\"type\": \"embed\", \"$ref\": \"<document-id>\"}\n"
+            "```\n"
+            "**Do NOT** call `get_document` or `plotly_get_data` to copy data into the "
+            "Word document — just reference it by ID."
         )
         if "plotly" in self._enabled_types:
             lines.append(

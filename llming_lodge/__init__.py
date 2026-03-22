@@ -1,36 +1,26 @@
-"""llming-lodge — chat interactions package."""
+"""llming-lodge — chat application layer.
 
-from llming_lodge.llm_base_models import ChatHistory, ChatMessage, Role
-from llming_lodge.session import ChatSession, LLMConfig
-from llming_lodge.llm_provider_manager import LLMManager
-from llming_lodge.providers.llm_provider_models import LLMInfo, ModelSize
-from llming_lodge.config import LLMGlobalConfig, LLMUserConfig
-from llming_lodge.budget import MongoDBBudgetLimit
-from llming_lodge.budget.budget_types import LimitPeriod
-from llming_lodge.budget.budget_limit import BudgetLimit
+LLM execution engine (providers, sessions, tools, budget) lives in llming-models.
+This package provides the chat UI, WebSocket controller, document plugins,
+nudge system, speech, and i18n on top of llming-models.
+"""
+
 from llming_lodge.chat_config import (
     ChatAppConfig, ChatUserConfig, QuickAction, ThemeConfig, ChatFrontendConfig,
+    PERM_NUDGE_ADMIN, PERM_DEV_TOOLS, PERM_HUB_ADMIN,
 )
+from llming_lodge.app_extensions import AppExtension
 
 __all__ = [
-    "ChatSession",
-    "ChatHistory",
-    "ChatMessage",
-    "Role",
-    "LLMConfig",
-    "LLMManager",
-    "ModelSize",
-    "LLMInfo",
-    "MongoDBBudgetLimit",
-    "LimitPeriod",
-    "BudgetLimit",
-    "LLMGlobalConfig",
-    "LLMUserConfig",
     "ChatAppConfig",
     "ChatUserConfig",
     "QuickAction",
     "ThemeConfig",
     "ChatFrontendConfig",
+    "PERM_NUDGE_ADMIN",
+    "PERM_DEV_TOOLS",
+    "PERM_HUB_ADMIN",
+    "AppExtension",
     "ChatPage",
 ]
 

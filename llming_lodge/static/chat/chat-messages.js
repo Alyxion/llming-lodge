@@ -113,8 +113,11 @@
     // ── Response Streaming ────────────────────────────────
 
     handleResponseStarted(msg) {
-      this.streaming = true;
-      this.md.streaming = true;
+      this._isIntercept = !!msg.intercept;
+      if (!this._isIntercept) {
+        this.streaming = true;
+        this.md.streaming = true;
+      }
       this.fullText = '';
       this.toolCalls = [];
       this._receivedImages = [];
@@ -128,9 +131,12 @@
       // Create assistant message container
       const msgEl = document.createElement('div');
       msgEl.className = 'cv2-msg-assistant';
+      const autoIconHtml = msg.auto_icon
+        ? `<img src="${this.config.staticBase}/${msg.auto_icon}" alt="" class="cv2-auto-icon">`
+        : '';
       msgEl.innerHTML = `
         <div class="cv2-msg-header">
-          <img src="${this.config.staticBase}/${msg.model_icon}" alt="">
+          ${autoIconHtml}<img src="${this.config.staticBase}/${msg.model_icon}" alt="">
           <span>${this._escHtml(msg.model_label)}</span>
         </div>
         <div class="cv2-tool-area"></div>
@@ -148,7 +154,7 @@
       this.el.messages.appendChild(this._spinner);
 
       this._scrollToBottom();
-      this._updateSendButton();
+      if (!this._isIntercept) this._updateSendButton();
     },
 
     handleTextChunk(msg) {
@@ -224,8 +230,12 @@
     },
 
     async handleResponseCompleted(msg) {
-      this.streaming = false;
-      this.md.streaming = false;
+      const wasIntercept = this._isIntercept;
+      this._isIntercept = false;
+      if (!wasIntercept) {
+        this.streaming = false;
+        this.md.streaming = false;
+      }
       this.fullText = msg.full_text;
 
       // Remove spinner
@@ -234,10 +244,47 @@
         this._spinner = null;
       }
 
+      // Merge full tool_calls data from response_completed (includes arguments + result)
+      if (msg.tool_calls?.length) {
+        for (const tc of msg.tool_calls) {
+          const existing = this.toolCalls.find(t => t.call_id === tc.call_id);
+          if (existing) Object.assign(existing, tc);
+          else this.toolCalls.push(tc);
+        }
+        this._renderToolArea();
+      }
+
+      // Collect flux sources from tool calls and set on message element
+      if (msg.tool_calls?.length && this._currentMsgEl) {
+        const allSources = [];
+        for (const tc of msg.tool_calls) {
+          if (tc.sources?.length) allSources.push(...tc.sources);
+        }
+        if (allSources.length) {
+          this._currentMsgEl.setAttribute('data-flux-sources', JSON.stringify(allSources));
+        }
+      }
+
       // Final render
       if (this._currentBody) {
         // Extract inline images from text
-        const { images, text } = this._extractInlineImages(this.fullText);
+        let { images, text } = this._extractInlineImages(this.fullText);
+        // Close any unclosed plugin fenced code blocks (truncated LLM output)
+        if (this.md._pluginRegistry) {
+          const langs = this.md._pluginRegistry.languages;
+          for (const lang of langs) {
+            const openTag = '```' + lang;
+            const idx = text.lastIndexOf(openTag);
+            if (idx !== -1) {
+              const after = text.slice(idx + openTag.length);
+              if (after.indexOf('\n```') === -1) {
+                console.log('[FIX] Closing unclosed', lang, 'fence');
+                text += '\n```';
+              }
+              break;
+            }
+          }
+        }
         this._currentBody.innerHTML = this.md.render(text);
 
         // Hydrate plugin blocks
@@ -248,8 +295,8 @@
           await this.md._pluginRegistry.runInlineRenderers(this._currentBody);
         }
 
-        // Add message actions (speaker + copy)
-        this._addMessageActions(this._currentBody, text);
+        // Add message actions (speaker + copy + timestamp)
+        this._addMessageActions(this._currentBody, text, new Date().toISOString());
 
         // Add extracted images
         for (const imgSrc of images) {
@@ -297,6 +344,20 @@
 
         // Wrap all images with hover actions + lightbox click
         this._wrapAllImages(this._currentBody);
+      }
+
+      // Apply MCP avatar override (e.g., LISA/LINUS custom avatar)
+      if (msg.avatar_override && this._currentMsgEl) {
+        const header = this._currentMsgEl.querySelector('.cv2-msg-header');
+        if (header) {
+          const img = header.querySelector('img');
+          const span = header.querySelector('span');
+          if (img) img.src = `${this.config.staticBase}/${msg.avatar_override.icon}`;
+          if (span) span.textContent = msg.avatar_override.label;
+        }
+        // Store for serialization so restored messages also show the avatar
+        this._currentMsgEl.dataset.avatarIcon = msg.avatar_override.icon;
+        this._currentMsgEl.dataset.avatarLabel = msg.avatar_override.label;
       }
 
       // Keep reference to last response body for TTS word highlighting
@@ -369,6 +430,27 @@
       if (this.el.messages) {
         this.el.messages.appendChild(el);
         this._scrollToBottom();
+      }
+    },
+
+    handleModelLocked(msg) {
+      // System droplet enforced a model — lock the selector
+      this._modelLocked = true;
+      this.currentModel = msg.model;
+      this.updateModelButton();
+      if (this.el.modelBtn) {
+        this.el.modelBtn.style.pointerEvents = 'none';
+        this.el.modelBtn.style.opacity = '0.6';
+        this.el.modelBtn.title = `Model locked by ${msg.reason || 'Droplet'}`;
+      }
+    },
+
+    handleModelUnlocked() {
+      this._modelLocked = false;
+      if (this.el.modelBtn) {
+        this.el.modelBtn.style.pointerEvents = '';
+        this.el.modelBtn.style.opacity = '';
+        this.el.modelBtn.title = '';
       }
     },
 
@@ -480,9 +562,19 @@
 
     handleSaveConversation(msg) {
       if (msg.data) {
+        const convId = msg.data.id;
+        // If currently in incognito, record this conversation ID so it's
+        // blocked even after incognito is exited (race condition protection)
+        if (this.incognito && convId) {
+          if (!this._incognitoConvIds) this._incognitoConvIds = new Set();
+          this._incognitoConvIds.add(convId);
+        }
+        // Block save for incognito conversations (even if incognito was
+        // already exited — the ID was recorded above or by idb.put)
+        if (this._incognitoConvIds?.has(convId)) return;
+
         // Fresh chat just got saved — clear the fresh draft key
         this._clearDraft('_fresh');
-        const convId = msg.data.id;
         this.activeConvId = convId;
         try {
           localStorage.setItem('cv2-active-conversation', convId);
@@ -563,6 +655,8 @@
       this._removeNudgeChatHeader();
       this._removeProjectChatHeader();
       this.chatVisible = false;
+      const incBtn = document.getElementById('cv2-incognito-toggle');
+      if (incBtn && !this.incognito) incBtn.style.display = '';
       this.el.messages.innerHTML = '';
       this.el.initialView.classList.remove('cv2-pv-hidden');
       this.el.messagesWrap.classList.remove('cv2-pv-hidden');
@@ -678,6 +772,9 @@
     handleUIAction(msg) {
       const action = msg.action;
       switch (action) {
+        case 'run_js':
+          try { new Function(msg.code)(); } catch(e) { console.error('[run_js]', e); }
+          break;
         case 'toggle_sidebar': {
           this.sidebarVisible = !this.sidebarVisible;
           this._updateSidebarUI(this.sidebarVisible);
@@ -883,6 +980,23 @@
           }
           break;
         }
+        case 'get_console_logs': {
+          // Debug API: return captured console log buffer
+          const since = msg.since || 0;
+          const level = msg.level || '';
+          const pattern = msg.pattern || '';
+          let logs = this._consoleLogs || [];
+          if (since) logs = logs.filter(e => e.ts >= since);
+          if (level) logs = logs.filter(e => e.level === level);
+          if (pattern) { try { const re = new RegExp(pattern, 'i'); logs = logs.filter(e => re.test(e.msg)); } catch(_) {} }
+          // Also include browser MCP worker status
+          const workers = {};
+          for (const [uid, entry] of Object.entries(this._mcpWorkers || {})) {
+            workers[uid] = { pendingCalls: Object.keys(entry.pendingCalls || {}).length };
+          }
+          this.ws.send({ type: 'console_logs', logs: logs.slice(-200), total: (this._consoleLogs || []).length, workers });
+          break;
+        }
         default:
           console.warn('[Chat] Unknown UI action:', action);
       }
@@ -911,6 +1025,11 @@
 
     handleNotification(msg) {
       this._showToast(msg.message, msg.level || 'negative');
+    },
+
+    handleDevMode(msg) {
+      this._devMode = !!msg.enabled;
+      console.log('[DEV] Dev mode', this._devMode ? 'enabled' : 'disabled');
     },
 
     _showNotificationDialog(message) {
@@ -965,12 +1084,17 @@
             }
             return f;
           });
+          this._pendingFirstMsgHtml = null;
           this.ws.send({ type: 'new_chat', preset: { id: proj.id, type: 'project', system_prompt: proj.system_prompt, model: proj.model, language: proj.language, files: projFiles, doc_plugins: proj.doc_plugins ?? null } });
         }
       }
 
       // Show chat area
       if (!this.chatVisible) this.showChat();
+
+      // Hide incognito toggle once conversation starts (both modes)
+      const _incBtn = document.getElementById('cv2-incognito-toggle');
+      if (_incBtn) _incBtn.style.display = 'none';
 
       // Render user message
       const userEl = document.createElement('div');
@@ -1034,19 +1158,68 @@
           this._wrapAllImages(el);
         } else if (msg.role === 'assistant') {
           const modelInfo = this.models.find(m => m.model === this.currentModel);
-          const icon = modelInfo?.icon || '';
-          const label = modelInfo?.label || '';
-          const { images: extractedImages, text } = this._extractInlineImages(content);
+          // Use avatar override if stored (MCP custom avatars like LISA/LINUS)
+          const av = msg.avatar_override;
+          let icon = av?.icon || modelInfo?.icon || '';
+          let label = av?.label || modelInfo?.label || '';
+          // For auto-select, show both icons + "Auto (Model Name)"
+          let autoIconHtml = '';
+          if (this.currentModel === '@auto' && !av) {
+            const autoInfo = this.models.find(m => m.model === '@auto');
+            const underlying = this._autoUnderlyingModel || '';
+            const realInfo = underlying ? this.models.find(m => m.model === underlying) : null;
+            if (autoInfo) {
+              autoIconHtml = `<img src="${this.config.staticBase}/${autoInfo.icon}" alt="" class="cv2-auto-icon">`;
+              if (realInfo) {
+                icon = realInfo.icon;
+                label = `Auto (${realInfo.label})`;
+              }
+            }
+          }
+          let { images: extractedImages, text } = this._extractInlineImages(content);
+          // Close any unclosed plugin fenced code blocks (truncated LLM output)
+          if (this.md._pluginRegistry) {
+            const langs = this.md._pluginRegistry.languages;
+            for (const lang of langs) {
+              const openTag = '```' + lang;
+              const idx = text.lastIndexOf(openTag);
+              if (idx !== -1) {
+                const after = text.slice(idx + openTag.length);
+                if (after.indexOf('\n```') === -1) {
+                  text += '\n```';
+                }
+                break;
+              }
+            }
+          }
 
           const el = document.createElement('div');
           el.className = 'cv2-msg-assistant';
+          const toolCalls = msg.tool_calls || [];
+
+          // Collect flux sources from saved tool calls
+          const allSources = [];
+          for (const tc of toolCalls) {
+            if (tc.sources?.length) allSources.push(...tc.sources);
+          }
+          if (allSources.length) {
+            el.setAttribute('data-flux-sources', JSON.stringify(allSources));
+          }
+
           el.innerHTML = `
             <div class="cv2-msg-header">
-              ${icon ? `<img src="${this.config.staticBase}/${icon}" alt="">` : ''}
+              ${autoIconHtml}${icon ? `<img src="${this.config.staticBase}/${icon}" alt="">` : ''}
               <span>${this._escHtml(label)}</span>
             </div>
+            ${toolCalls.length > 0 ? '<div class="cv2-tool-area"></div>' : ''}
             <div class="cv2-msg-body">${this.md.render(text)}</div>
           `;
+
+          // Render saved tool calls
+          if (toolCalls.length > 0) {
+            const toolArea = el.querySelector('.cv2-tool-area');
+            this._renderSavedToolCalls(toolArea, toolCalls);
+          }
 
           const body = el.querySelector('.cv2-msg-body');
 
@@ -1074,7 +1247,7 @@
             body.appendChild(imgEl);
           }
 
-          this._addMessageActions(body, text);
+          this._addMessageActions(body, text, msg.timestamp);
           this._wrapAllImages(body);
           this.el.messages.appendChild(el);
         }
@@ -1085,9 +1258,24 @@
 
     // ── Message Actions (speaker + copy on hover) ─────────
 
-    _addMessageActions(bodyEl, text) {
+    _addMessageActions(bodyEl, text, timestamp) {
       const bar = document.createElement('div');
       bar.className = 'cv2-msg-actions';
+
+      // Timestamp label — subtle, shown on hover with the actions
+      if (timestamp) {
+        const d = new Date(timestamp);
+        if (!isNaN(d)) {
+          const now = new Date();
+          const isToday = d.toDateString() === now.toDateString();
+          const time = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+          const label = isToday ? time : d.toLocaleDateString([], { day: 'numeric', month: 'short' }) + ' ' + time;
+          const ts = document.createElement('span');
+          ts.className = 'cv2-msg-timestamp';
+          ts.textContent = label;
+          bar.appendChild(ts);
+        }
+      }
 
       // Speaker button — only if speakable
       if (this._isSpeakable(text)) {
@@ -1354,6 +1542,10 @@
       }
       if (except !== 'voicePicker' && this.el.voicePicker) this.el.voicePicker.style.display = 'none';
       if (except !== 'admin' && this.el.adminPopover) this.el.adminPopover.classList.remove('cv2-visible');
+      if (except !== 'devSettings' && this.el.devSettingsPopover) {
+        this.devSettingsOpen = false;
+        this.el.devSettingsPopover.classList.remove('cv2-visible');
+      }
     },
 
     _closeGearMenu() {
@@ -1494,6 +1686,8 @@
       'response_cancelled': 'handleResponseCancelled',
       'error': 'handleError',
       'model_switched': 'handleModelSwitched',
+      'model_locked': 'handleModelLocked',
+      'model_unlocked': 'handleModelUnlocked',
       'tools_updated': 'handleToolsUpdated',
       'register_renderers': 'handleRegisterRenderers',
       'context_info': 'handleContextInfo',
@@ -1512,6 +1706,7 @@
       'language_changed': 'handleLanguageChanged',
       'action_callback_result': 'handleActionCallbackResult',
       'notification': 'handleNotification',
+      'dev_mode': 'handleDevMode',
     },
   });
 })();

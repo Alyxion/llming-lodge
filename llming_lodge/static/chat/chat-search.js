@@ -237,6 +237,7 @@
       const newChatEl = container.querySelector('.cv2-search-new-chat');
       if (newChatEl) {
         newChatEl.addEventListener('click', () => {
+          this._pendingFirstMsgHtml = null;
           this.ws.send({ type: 'new_chat' });
           this._closeSearchDialog();
         });

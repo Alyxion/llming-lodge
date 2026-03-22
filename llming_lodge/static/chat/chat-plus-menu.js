@@ -11,6 +11,56 @@
     const completed = this.toolCalls.filter(tc => tc.status === 'completed' && !tc.is_image_generation);
     const imageGen = this.toolCalls.find(tc => tc.status === 'pending' && tc.is_image_generation);
 
+    /* ── Non-dev mode: show only the currently active tool, then fade out ── */
+    if (!this._devMode) {
+      // All done → fade out after a short delay
+      if (pending.length === 0 && completed.length > 0) {
+        if (!this._toolFadeTimer) {
+          this._toolFadeTimer = setTimeout(() => {
+            if (this._currentToolArea) {
+              this._currentToolArea.style.transition = 'opacity 0.4s ease, max-height 0.4s ease';
+              this._currentToolArea.style.opacity = '0';
+              this._currentToolArea.style.maxHeight = '0';
+              this._currentToolArea.style.overflow = 'hidden';
+            }
+            this._toolFadeTimer = null;
+          }, 800);
+        }
+        return;
+      }
+      // Still running → show only the current pending tool
+      if (this._toolFadeTimer) { clearTimeout(this._toolFadeTimer); this._toolFadeTimer = null; }
+      if (this._currentToolArea) {
+        this._currentToolArea.style.transition = '';
+        this._currentToolArea.style.opacity = '';
+        this._currentToolArea.style.maxHeight = '';
+        this._currentToolArea.style.overflow = '';
+      }
+      let html = '';
+      if (pending.length > 0) {
+        const tc = pending[0];
+        if (tc.is_image_generation) {
+          html += `
+            <div style="display:flex;flex-direction:column;align-items:center;gap:16px">
+              <span class="cv2-shimmer" style="font-size:16px">${this.t('chat.generating_image')}</span>
+              <div class="cv2-image-placeholder">
+                <div class="cv2-spinner-dots"><span></span><span></span><span></span></div>
+              </div>
+            </div>`;
+        } else {
+          const label = tc.name === 'web_search' ? this.t('chat.searching_web') : this.t('chat.running_tool', { name: this._escHtml(tc.display_name) });
+          html += `
+            <div class="cv2-tool-pending">
+              <div class="cv2-spinner-dots"><span></span><span></span><span></span></div>
+              <span class="cv2-shimmer">${label}</span>
+            </div>`;
+        }
+      }
+      this._currentToolArea.innerHTML = html;
+      return;
+    }
+
+    /* ── Dev mode: show full tool stack (original behaviour) ── */
     let html = '';
 
     // Pending tools
@@ -42,17 +92,83 @@
       }
     }
 
-    // Completed tools
+    // Completed tools (expandable to show arguments & result)
     for (const tc of completed) {
-      html += `
-        <div class="cv2-tool-completed">
-          <span class="material-icons cv2-icon-check">check_circle</span>
-          <span>${this.t('chat.used_tool', { name: this._escHtml(tc.display_name) })}</span>
-        </div>
-      `;
+      const hasDetail = tc.arguments || tc.result || tc.error;
+      html += `<div class="cv2-tool-completed${hasDetail ? ' cv2-tool-expandable' : ''}">`;
+      html += `<span class="material-icons cv2-icon-check">check_circle</span>`;
+      html += `<span style="flex:1">${this.t('chat.used_tool', { name: this._escHtml(tc.display_name) })}</span>`;
+      if (hasDetail) html += `<span class="material-icons cv2-tool-expand-icon" style="font-size:16px;opacity:0.4;transition:transform 0.15s">expand_more</span>`;
+      html += `</div>`;
+      if (hasDetail) {
+        html += `<div class="cv2-tool-detail" style="display:none">`;
+        if (tc.arguments && Object.keys(tc.arguments).length > 0) {
+          html += `<div class="cv2-tool-detail-section"><span class="cv2-tool-detail-label">Input</span><pre class="cv2-tool-detail-pre">${this._escHtml(JSON.stringify(tc.arguments, null, 2))}</pre></div>`;
+        }
+        if (tc.result != null) {
+          const resultStr = typeof tc.result === 'string' ? tc.result : JSON.stringify(tc.result, null, 2);
+          html += `<div class="cv2-tool-detail-section"><span class="cv2-tool-detail-label">Output</span><pre class="cv2-tool-detail-pre">${this._escHtml(resultStr)}</pre></div>`;
+        }
+        if (tc.error) {
+          html += `<div class="cv2-tool-detail-section"><span class="cv2-tool-detail-label" style="color:var(--cv2-danger,#ef4444)">Error</span><pre class="cv2-tool-detail-pre" style="color:var(--cv2-danger,#ef4444)">${this._escHtml(tc.error)}</pre></div>`;
+        }
+        html += `</div>`;
+      }
     }
 
     this._currentToolArea.innerHTML = html;
+
+    // Bind expand/collapse handlers
+    for (const el of this._currentToolArea.querySelectorAll('.cv2-tool-expandable')) {
+      el.addEventListener('click', () => {
+        const detail = el.nextElementSibling;
+        if (!detail || !detail.classList.contains('cv2-tool-detail')) return;
+        const open = detail.style.display !== 'none';
+        detail.style.display = open ? 'none' : 'block';
+        const icon = el.querySelector('.cv2-tool-expand-icon');
+        if (icon) icon.style.transform = open ? '' : 'rotate(180deg)';
+      });
+    }
+  },
+
+  /** Render tool calls from a saved/restored conversation message. */
+  _renderSavedToolCalls(toolArea, toolCalls) {
+    if (!this._devMode) { toolArea.innerHTML = ''; return; }
+    let html = '';
+    for (const tc of toolCalls) {
+      if (tc.is_image_generation) continue;
+      const hasDetail = tc.arguments || tc.result || tc.error;
+      html += `<div class="cv2-tool-completed${hasDetail ? ' cv2-tool-expandable' : ''}">`;
+      html += `<span class="material-icons cv2-icon-check">check_circle</span>`;
+      html += `<span style="flex:1">${this.t('chat.used_tool', { name: this._escHtml(tc.display_name || tc.name) })}</span>`;
+      if (hasDetail) html += `<span class="material-icons cv2-tool-expand-icon" style="font-size:16px;opacity:0.4;transition:transform 0.15s">expand_more</span>`;
+      html += `</div>`;
+      if (hasDetail) {
+        html += `<div class="cv2-tool-detail" style="display:none">`;
+        if (tc.arguments && Object.keys(tc.arguments).length > 0) {
+          html += `<div class="cv2-tool-detail-section"><span class="cv2-tool-detail-label">Input</span><pre class="cv2-tool-detail-pre">${this._escHtml(JSON.stringify(tc.arguments, null, 2))}</pre></div>`;
+        }
+        if (tc.result != null) {
+          const resultStr = typeof tc.result === 'string' ? tc.result : JSON.stringify(tc.result, null, 2);
+          html += `<div class="cv2-tool-detail-section"><span class="cv2-tool-detail-label">Output</span><pre class="cv2-tool-detail-pre">${this._escHtml(resultStr)}</pre></div>`;
+        }
+        if (tc.error) {
+          html += `<div class="cv2-tool-detail-section"><span class="cv2-tool-detail-label" style="color:var(--cv2-danger,#ef4444)">Error</span><pre class="cv2-tool-detail-pre" style="color:var(--cv2-danger,#ef4444)">${this._escHtml(tc.error)}</pre></div>`;
+        }
+        html += `</div>`;
+      }
+    }
+    toolArea.innerHTML = html;
+    for (const el of toolArea.querySelectorAll('.cv2-tool-expandable')) {
+      el.addEventListener('click', () => {
+        const detail = el.nextElementSibling;
+        if (!detail || !detail.classList.contains('cv2-tool-detail')) return;
+        const open = detail.style.display !== 'none';
+        detail.style.display = open ? 'none' : 'block';
+        const icon = el.querySelector('.cv2-tool-expand-icon');
+        if (icon) icon.style.transform = open ? '' : 'rotate(180deg)';
+      });
+    }
   },
 
   /** Render a single tool toggle row. Greyed out + tooltip when unavailable. */
@@ -62,8 +178,9 @@
     const title = disabled && tool.required_provider
       ? `Requires: ${Array.isArray(tool.required_provider) ? tool.required_provider.join(', ') : tool.required_provider}`
       : '';
-    const toggleCls = tool.enabled && !disabled ? 'cv2-on' : '';
-    const toggleName = tool.group_id || tool.name;
+    const toggleCls = tool.enabled ? 'cv2-on' : '';
+    // Collapsed groups use group_id (one toggle per server); individual flyout tools use their own name
+    const toggleName = tool.collapse_tools ? (tool.group_id || tool.name) : tool.name;
     return `
       <div class="cv2-tool-item${disabled ? ' cv2-tool-disabled' : ''}" data-tool="${this._escAttr(tool.name)}" style="${extraStyle || ''}${disabledStyle}"${title ? ` title="${this._escAttr(title)}"` : ''}>
         <span class="material-icons" style="font-size:16px">${icon || 'build'}</span>
@@ -236,22 +353,70 @@
       }
     });
 
+    // Relocate nested flyout panels (e.g. Office 365 inside Tools) to the
+    // plus-menu root so they escape the parent's overflow-y:auto clipping.
+    const toolsPanel = this.el.plusMenu.querySelector('[data-flyout-panel="tools"]');
+    if (toolsPanel) {
+      toolsPanel.querySelectorAll(':scope > .cv2-flyout-menu').forEach(nested => {
+        nested.classList.add('cv2-nested-flyout');
+        this.el.plusMenu.appendChild(nested);
+      });
+    }
+
     // Flyout triggers (Tools + flyout categories)
+    // Track hide functions per flyout key so nested panels can keep their parent alive
+    const flyoutHideMap = {};
     this.el.plusMenu.querySelectorAll('.cv2-flyout-trigger').forEach(trigger => {
       const key = trigger.dataset.flyout;
       const panel = this.el.plusMenu.querySelector(`[data-flyout-panel="${key}"]`);
       if (!panel) return;
+      // Nested flyouts (inside another flyout) use fixed positioning to escape overflow clipping
+      const parentPanel = trigger.closest('.cv2-flyout-menu');
+      const isNested = !!parentPanel;
+      const parentKey = parentPanel?.dataset?.flyoutPanel;
       let hideTimeout = null;
-      const show = () => { clearTimeout(hideTimeout); panel.classList.add('cv2-visible'); };
-      const hide = () => { hideTimeout = setTimeout(() => panel.classList.remove('cv2-visible'), 150); };
+      const cancelHide = () => clearTimeout(hideTimeout);
+      const show = () => {
+        cancelHide();
+        // Also keep parent alive while nested panel is open
+        if (parentKey && flyoutHideMap[parentKey]) flyoutHideMap[parentKey].cancel();
+        panel.classList.add('cv2-visible');
+        if (isNested) {
+          const rect = trigger.getBoundingClientRect();
+          panel.style.position = 'fixed';
+          panel.style.left = (rect.right + 4) + 'px';
+          panel.style.bottom = 'auto';
+          const panelHeight = panel.offsetHeight;
+          let top = rect.bottom - panelHeight;
+          if (top < 8) top = 8;
+          if (top + panelHeight > window.innerHeight - 8) top = window.innerHeight - 8 - panelHeight;
+          panel.style.top = top + 'px';
+        }
+      };
+      const hide = () => {
+        hideTimeout = setTimeout(() => panel.classList.remove('cv2-visible'), 150);
+      };
+      flyoutHideMap[key] = { cancel: cancelHide, hide };
       trigger.addEventListener('mouseenter', show);
       trigger.addEventListener('mouseleave', hide);
-      panel.addEventListener('mouseenter', () => clearTimeout(hideTimeout));
-      panel.addEventListener('mouseleave', hide);
+      panel.addEventListener('mouseenter', () => {
+        cancelHide();
+        // Keep parent alive while hovering nested panel
+        if (parentKey && flyoutHideMap[parentKey]) flyoutHideMap[parentKey].cancel();
+      });
+      panel.addEventListener('mouseleave', () => {
+        hide();
+        // Also start parent hide timer when leaving nested panel
+        if (parentKey && flyoutHideMap[parentKey]) flyoutHideMap[parentKey].hide();
+      });
       // Also toggle on click for touch devices
       trigger.addEventListener('click', (e) => {
         e.stopPropagation();
-        panel.classList.toggle('cv2-visible');
+        if (panel.classList.contains('cv2-visible')) {
+          panel.classList.remove('cv2-visible');
+        } else {
+          show();
+        }
       });
     });
 

@@ -81,35 +81,58 @@
   _renderNudgeGreeting(nudge) {
     const row = this.el.initialView?.querySelector('.cv2-greeting-row');
     if (!row) return;
-    const iconHtml = nudge.icon
-      ? `<img class="cv2-nudge-welcome-icon" src="${this._escAttr(nudge.icon)}" alt="">`
-      : '<span class="material-icons cv2-nudge-welcome-icon-default">science</span>';
-    const descHtml = nudge.description
-      ? `<p class="cv2-nudge-welcome-desc">${this._escHtml(nudge.description)}</p>`
+    const lName = this._localizedNudge(nudge, 'name') || nudge.name;
+    const lDesc = this._localizedNudge(nudge, 'description') || nudge.description;
+    const lSuggestions = this._localizedNudge(nudge, 'suggestions') || nudge.suggestions;
+    const iconHtml = this._renderIcon(nudge.icon, nudge.icon && this._isIconUrl(nudge.icon) ? 'cv2-nudge-welcome-icon' : 'cv2-nudge-welcome-icon-default', 'science');
+    const descHtml = lDesc
+      ? `<p class="cv2-nudge-welcome-desc">${this._escHtml(lDesc)}</p>`
       : '';
     const creatorHtml = nudge.creator_name
       ? `<p class="cv2-nudge-welcome-creator">${this.t('chat.nudge_by_creator', { name: this._escHtml(nudge.creator_name) })}</p>`
       : '';
-    const allSuggestions = this._parseSuggestions(nudge.suggestions);
+    const allSuggestions = this._parseSuggestions(lSuggestions);
     const picked = this._pickRandom(allSuggestions, 4);
     const suggestionsHtml = picked.length > 0
       ? `<div class="cv2-nudge-suggestions">${picked.map(s =>
           `<button class="cv2-nudge-suggestion" data-text="${this._escAttr(s)}">${this._escHtml(s)}</button>`
         ).join('')}</div>`
       : '';
+
+    // Bolt shortcuts section
+    const bolts = nudge.bolts || [];
+    const boltLabel = this.config?.boltLabel || 'Bolts';
+    const boltsHtml = bolts.length > 0
+      ? `<div class="cv2-nudge-bolts">
+          <div class="cv2-nudge-bolts-label">${this._escHtml(boltLabel)}</div>
+          <div class="cv2-nudge-bolts-list">${bolts.map(b =>
+            `<button class="cv2-nudge-bolt-chip" data-cmd="${this._escAttr(b.command)}" title="${this._escHtml(b.description || '')}">` +
+            `<span class="material-icons" style="font-size:15px">${this._escHtml(b.icon || 'bolt')}</span> ` +
+            `<span>/${this._escHtml(b.command)}</span></button>`
+          ).join('')}</div>
+        </div>`
+      : '';
+
     row.innerHTML = `<div class="cv2-nudge-welcome">
       <div class="cv2-nudge-welcome-row">
         ${iconHtml}
         <div class="cv2-nudge-welcome-text">
-          <h2>${this._escHtml(nudge.name)}</h2>
+          <h2>${this._escHtml(lName)}</h2>
           ${creatorHtml}${descHtml}
         </div>
       </div>
-      ${suggestionsHtml}</div>`;
+      ${suggestionsHtml}${boltsHtml}</div>`;
     row.querySelectorAll('.cv2-nudge-suggestion').forEach(btn => {
       btn.addEventListener('click', () => {
         this.el.textarea.value = btn.dataset.text;
         this.sendMessage();
+      });
+    });
+    row.querySelectorAll('.cv2-nudge-bolt-chip').forEach(btn => {
+      btn.addEventListener('click', () => {
+        this.el.textarea.value = '/' + btn.dataset.cmd;
+        this.el.textarea.focus();
+        this._boltsOnInput(this.el.textarea.value.trim());
       });
     });
   },
@@ -119,11 +142,10 @@
     this._removeNudgeChatHeader();
     this._removeProjectChatHeader();
 
-    const iconHtml = nudge.icon
-      ? `<img src="${this._escAttr(nudge.icon)}" alt="">`
-      : '<span class="material-icons">science</span>';
-    const descHtml = nudge.description
-      ? `<p class="cv2-nudge-header-desc">${this._escHtml(nudge.description)}</p>`
+    const iconHtml = this._renderIcon(nudge.icon, '', 'science');
+    const lDesc = this._localizedNudge(nudge, 'description') || nudge.description;
+    const descHtml = lDesc
+      ? `<p class="cv2-nudge-header-desc">${this._escHtml(lDesc)}</p>`
       : '';
 
     // Heart button HTML (only for MongoDB nudges with uid)
@@ -148,7 +170,7 @@
     expanded.innerHTML = `
       <div class="cv2-nudge-header-icon">${iconHtml}</div>
       <div class="cv2-nudge-header-text">
-        <h3 class="cv2-nudge-header-name">${this._escHtml(nudge.name)}</h3>
+        <h3 class="cv2-nudge-header-name">${this._escHtml(this._localizedNudge(nudge, 'name') || nudge.name)}</h3>
         ${descHtml}
       </div>
       <div style="flex:1"></div>
@@ -229,8 +251,10 @@
   _restoreDefaultGreeting() {
     const row = this.el.initialView?.querySelector('.cv2-greeting-row');
     if (!row) return;
+    const mascotSrc = this.incognito && this.config.appMascotIncognito
+      ? this.config.appMascotIncognito : this.config.appMascot;
     const mascotHtml = this.config.appMascot
-      ? `<img class="cv2-mascot" src="${this._escAttr(this.config.appMascot)}" alt="">`
+      ? `<img class="cv2-mascot" src="${this._escAttr(mascotSrc)}" data-default-src="${this._escAttr(this.config.appMascot)}" alt="">`
       : '';
     const greetName = this.userName || 'there';
     row.innerHTML = `${mascotHtml}<h2 id="cv2-greeting">${this._escHtml(this._getGreeting(greetName))}</h2>`;
@@ -298,7 +322,7 @@
         description: '', suggestions: '', capabilities: {},
         uid: crypto.randomUUID(), mode: 'dev', category: '', sub_category: '',
         visibility: [], creator_name: this.fullName || this.userName || '',
-        creator_email: this.config.userEmail || '',
+        creator_email: this.config.userEmail || '', version: '0.0.1',
       } : {}),
     };
 
@@ -328,13 +352,22 @@
       <div class="cv2-preset-tabs">
         <button class="cv2-preset-tab cv2-active" data-tab="standard">${this.t('chat.preset_standard')}</button>
         <button class="cv2-preset-tab" data-tab="advanced">${this.t('chat.preset_advanced')}</button>
+        ${this.hasPerm('nudge_admin') && type === 'nudge' && !isNew ? `<button class="cv2-preset-tab" data-tab="admin"><span class="material-icons" style="font-size:14px;vertical-align:text-bottom;margin-right:2px">admin_panel_settings</span>Admin</button>` : ''}
       </div>
       <div class="cv2-preset-scroll">
         <div class="cv2-preset-form">
           <div class="cv2-preset-tab-content" data-tab="standard">
+            ${type === 'nudge' && hasNudgeStore ? (() => {
+              const langs = (this.config.supportedLanguages || []).filter(l => l.code !== 'de-swg');
+              const defaultLang = langs.find(l => l.code === 'en-us') || langs[0] || { code: 'en-us', flag: '🇺🇸' };
+              return `<div class="cv2-i18n-bar" id="cv2-i18n-bar">
+                ${langs.map(l => `<button class="cv2-i18n-flag${l.code === defaultLang.code ? ' cv2-active' : ''}" data-lang="${this._escAttr(l.code)}" title="${this._escHtml(l.label || l.code)}">${l.flag || l.code}</button>`).join('')}
+              </div>`;
+            })() : ''}
+
             <div class="cv2-preset-icon-name-row">
               <div class="cv2-preset-icon-preview ${data.icon ? 'cv2-has-icon' : ''}" id="cv2-preset-icon-preview" title="Click to upload icon">
-                ${data.icon ? `<img src="${data.icon}" alt="">` : `<span class="material-icons" style="font-size:28px;color:var(--chat-text-muted)">add</span>`}
+                ${data.icon ? (this._isIconUrl(data.icon) ? `<img src="${this._escAttr(data.icon)}" alt="">` : `<span class="material-icons" style="font-size:28px">${this._escHtml(data.icon)}</span>`) : `<span class="material-icons" style="font-size:28px;color:var(--chat-text-muted)">add</span>`}
               </div>
               <input type="file" id="cv2-preset-icon-input" accept="image/*" style="display:none">
               <input type="text" class="cv2-preset-input" id="cv2-preset-name" value="${this._escAttr(data.name)}" placeholder="${type === 'nudge' ? this.t('chat.nudge_placeholder') : this.t('chat.project_placeholder')}" style="flex:1">
@@ -346,32 +379,30 @@
 
               ${(() => {
                 const editableTeams = this.teams.filter(t => t.role === 'owner' || t.role === 'editor');
+                const isOwnNudge = !data.creator_email || (data.creator_email || '').toLowerCase() === (this.config.userEmail || '').toLowerCase();
+                const personalLabel = isOwnNudge
+                  ? (this.t('chat.preset_owner_personal') || 'Personal') + ' (' + this._escHtml(this.fullName || this.userName || '') + ')'
+                  : this._escHtml(data.creator_name || data.creator_email || '');
                 if (editableTeams.length > 0) {
                   const currentTeamId = data.team_id || '';
                   return `
                     <label class="cv2-preset-label">${this.t('chat.preset_owner') || 'Owner'}</label>
                     <select class="cv2-preset-select" id="cv2-preset-owner">
-                      <option value="" ${!currentTeamId ? 'selected' : ''}>${this.t('chat.preset_owner_personal') || 'Personal'} (${this._escHtml(this.fullName || this.userName || '')})</option>
+                      <option value="" ${!currentTeamId ? 'selected' : ''}>${personalLabel}</option>
                       ${editableTeams.map(t => `<option value="${this._escAttr(t.teamId || t.team_id)}" ${currentTeamId === (t.teamId || t.team_id) ? 'selected' : ''}>${this._escHtml(t.name)}</option>`).join('')}
                     </select>`;
                 } else {
                   return `
                     <label class="cv2-preset-label">${this.t('chat.preset_owner') || 'Owner'}</label>
                     <div class="cv2-preset-user-row">
-                      ${this.userAvatar
+                      ${this.userAvatar && isOwnNudge
                         ? `<img class="cv2-preset-user-avatar" src="${this._escAttr(this.userAvatar)}" alt="">`
                         : '<span class="material-icons cv2-preset-user-avatar-default">person</span>'}
-                      <span class="cv2-preset-user-name">${this._escHtml(this.fullName || this.userName || '')}</span>
+                      <span class="cv2-preset-user-name">${personalLabel}</span>
                     </div>`;
                 }
               })()}
 
-              ${this.config.isAdmin && data.uid ? `
-                <label class="cv2-preset-label" style="margin-top:8px">Transfer to (admin)</label>
-                <input type="email" class="cv2-preset-input" id="cv2-preset-transfer-email"
-                       value="${this._escAttr(data.creator_email || '')}"
-                       placeholder="user@example.com">
-              ` : ''}
             ` : ''}
 
             <label class="cv2-preset-label">${this.t('chat.preset_system_prompt') || 'System Prompt'}</label>
@@ -379,7 +410,7 @@
 
             ${type === 'nudge' ? `
               <label class="cv2-preset-label">${this.t('chat.preset_suggestions')}</label>
-              <textarea class="cv2-preset-textarea" id="cv2-preset-suggestions" rows="4" placeholder="${this._escAttr(this.t('chat.preset_suggestions_hint'))}">${this._escHtml(data.suggestions || '')}</textarea>
+              <textarea class="cv2-preset-textarea" id="cv2-preset-suggestions" rows="4" placeholder="${this._escAttr(this.t('chat.preset_suggestions_hint'))}">${this._escHtml(Array.isArray(data.suggestions) ? data.suggestions.join('\n') : (data.suggestions || ''))}</textarea>
             ` : ''}
 
             ${type === 'nudge' && hasNudgeStore ? (() => {
@@ -405,6 +436,47 @@
                 <span class="cv2-preset-token-label" id="cv2-preset-token-label"></span>
               </div>
             </div>
+
+            ${type === 'nudge' && hasNudgeStore ? `
+              <div class="cv2-preset-row">
+                <div class="cv2-preset-field">
+                  <label class="cv2-preset-label">${this.t('chat.nudge_category') || 'Category'}</label>
+                  <select class="cv2-preset-select" id="cv2-preset-category">
+                    <option value="">—</option>
+                    ${(this.config.nudgeCategories || []).map(c =>
+                      `<option value="${this._escAttr(c.key)}" ${data.category === c.key ? 'selected' : ''}>${this._escHtml(c.label)}</option>`
+                    ).join('')}
+                  </select>
+                </div>
+                <div class="cv2-preset-field">
+                  <label class="cv2-preset-label">${this.t('chat.nudge_sub_category') || 'Sub-category'}</label>
+                  <input type="text" class="cv2-preset-input" id="cv2-preset-sub-category" value="${this._escAttr(data.sub_category || '')}" placeholder="${this._escAttr(this.t('chat.nudge_sub_category_hint') || 'e.g. Sales, HR, ...')}">
+                </div>
+              </div>
+              ${!isNew && data.mode === 'dev' && this._canEditNudge(data) ? (() => {
+                const hasLive = !!data._has_live;
+                const liveMatches = !!data._live_matches;
+                const devVer = data.version || '0.0.1';
+                const liveVer = data._live_version || '';
+                let barClass, barText, barActions;
+                if (!hasLive) {
+                  barClass = 'cv2-pub-draft';
+                  barText = (this.t('chat.nudge_draft') || 'Draft — not published') + '<span class="cv2-pub-ver">v' + this._escHtml(devVer) + '</span>';
+                  barActions = '<button class="cv2-dialog-btn cv2-notification-ok cv2-pub-action" id="cv2-pub-publish"><span class="material-icons" style="font-size:16px;margin-right:4px">publish</span>' + (this.t('chat.nudge_flush') || 'Publish') + '</button>';
+                } else if (liveMatches) {
+                  barClass = 'cv2-pub-published';
+                  barText = (this.t('chat.nudge_published') || 'Published') + '<span class="cv2-pub-ver">v' + this._escHtml(devVer) + '</span>';
+                  barActions = '<button class="cv2-pub-link" id="cv2-pub-unpublish">' + (this.t('chat.nudge_unpublish') || 'Unpublish') + '</button>';
+                } else {
+                  barClass = 'cv2-pub-changed';
+                  barText = (this.t('chat.nudge_unpublished_changes') || 'Unpublished changes')
+                    + '<span class="cv2-pub-ver">dev v' + this._escHtml(devVer) + (liveVer ? ' · live v' + this._escHtml(liveVer) : '') + '</span>';
+                  barActions = '<button class="cv2-pub-link" id="cv2-pub-revert">' + (this.t('chat.nudge_revert') || 'Revert') + '</button>'
+                    + '<button class="cv2-dialog-btn cv2-notification-ok cv2-pub-action" id="cv2-pub-publish"><span class="material-icons" style="font-size:16px;margin-right:4px">publish</span>' + (this.t('chat.nudge_flush') || 'Publish') + '</button>';
+                }
+                return '<div class="cv2-pub-status-bar ' + barClass + '"><span class="cv2-pub-dot"></span><span class="cv2-pub-text">' + barText + '</span><div class="cv2-pub-actions">' + barActions + '</div></div>';
+              })() : ''}
+            ` : ''}
 
             ${!isNew ? `<div class="cv2-preset-danger-zone">
               <button class="cv2-preset-delete-link" id="cv2-preset-delete">
@@ -436,10 +508,12 @@
               <div class="cv2-preset-capabilities" id="cv2-preset-capabilities">
                 ${capTools.map(t => {
                   const capVal = data.capabilities && t.name in data.capabilities ? data.capabilities[t.name] : null;
-                  const checked = capVal === true;
-                  const indeterminate = capVal === null || capVal === undefined;
+                  // web_search: simple on/off, default checked. Others: tristate.
+                  const isSimple = t.name === 'web_search';
+                  const checked = isSimple ? capVal !== false : capVal === true;
+                  const indeterminate = isSimple ? false : (capVal === null || capVal === undefined);
                   return `<label class="cv2-preset-cap-item">
-                    <input type="checkbox" data-cap="${this._escAttr(t.name)}" data-tristate="true" ${checked ? 'checked' : ''} ${indeterminate ? 'data-indeterminate="true"' : ''}>
+                    <input type="checkbox" data-cap="${this._escAttr(t.name)}" ${isSimple ? '' : 'data-tristate="true" '}${checked ? 'checked' : ''} ${indeterminate ? 'data-indeterminate="true"' : ''}>
                     <span class="material-icons">${t.icon || 'build'}</span>
                     ${this._escHtml(t.display_name)}
                     <span class="cv2-cap-state" style="margin-left:auto;font-size:11px;opacity:0.6">${indeterminate ? "user's choice" : ''}</span>
@@ -478,57 +552,39 @@
               </div>
             ` : ''}
 
-            ${type === 'nudge' && hasNudgeStore ? `
-              <div class="cv2-preset-row">
-                <div class="cv2-preset-field">
-                  <label class="cv2-preset-label">${this.t('chat.nudge_category') || 'Category'}</label>
-                  <select class="cv2-preset-select" id="cv2-preset-category">
-                    <option value="">—</option>
-                    ${(this.config.nudgeCategories || []).map(c =>
-                      `<option value="${this._escAttr(c.key)}" ${data.category === c.key ? 'selected' : ''}>${this._escHtml(c.label)}</option>`
-                    ).join('')}
-                  </select>
-                </div>
-                <div class="cv2-preset-field">
-                  <label class="cv2-preset-label">${this.t('chat.nudge_sub_category') || 'Sub-category'}</label>
-                  <input type="text" class="cv2-preset-input" id="cv2-preset-sub-category" value="${this._escAttr(data.sub_category || '')}" placeholder="${this._escAttr(this.t('chat.nudge_sub_category_hint') || 'e.g. Sales, HR, ...')}">
-                </div>
-              </div>
-              <div class="cv2-preset-row">
-                <div class="cv2-preset-field">
-                  <label class="cv2-preset-label">${this.t('chat.nudge_dev') || 'Mode'}</label>
-                  <span class="cv2-nudge-mode-badge cv2-mode-${data.mode || 'dev'}">${data.mode === 'live' ? (this.t('chat.nudge_live') || 'Live') : (this.t('chat.nudge_dev') || 'Dev')}</span>
-                </div>
-              </div>
-              ${this.config.isAdmin ? `
-                <div class="cv2-preset-row" style="margin-top:12px">
-                  <label class="cv2-preset-cap-item" id="cv2-master-toggle-row">
-                    <input type="checkbox" id="cv2-preset-is-master" ${data.is_master ? 'checked' : ''}>
-                    <span class="material-icons" style="color:#D4A017">auto_awesome</span>
-                    Master Droplet
-                    <span style="margin-left:auto;font-size:11px;opacity:0.6">Always injected for eligible users</span>
-                  </label>
-                </div>
-                <div class="cv2-preset-row" style="margin-top:4px">
-                  <label class="cv2-preset-cap-item">
-                    <input type="checkbox" id="cv2-preset-auto-discover" ${data.auto_discover ? 'checked' : ''}>
-                    <span class="material-icons" style="color:#7B68EE">travel_explore</span>
-                    Auto-Discover
-                  </label>
-                  <div id="cv2-auto-discover-when" style="margin-top:6px;padding-left:32px;${data.auto_discover ? '' : 'display:none'}">
-                    <input type="text" class="cv2-preset-input" id="cv2-preset-auto-discover-when" value="${this._escAttr(data.auto_discover_when || '')}" placeholder="e.g. When the user asks about compliance, HR policies, ...">
-                  </div>
-                </div>
-              ` : ''}
-              ${!isNew && data.mode === 'dev' && this._canEditNudge(data) ? `
-                <div class="cv2-preset-flush-section">
-                  <button class="cv2-dialog-btn cv2-notification-ok" id="cv2-preset-flush">
-                    <span class="material-icons" style="font-size:16px;margin-right:4px">publish</span>${this.t('chat.nudge_flush') || 'Publish'}
-                  </button>
-                </div>
-              ` : ''}
-            ` : ''}
           </div>
+
+          ${this.hasPerm('nudge_admin') && type === 'nudge' && !isNew ? `
+          <div class="cv2-preset-tab-content" data-tab="admin" style="display:none">
+            <label class="cv2-preset-label">Owner</label>
+            <div style="display:flex;align-items:center;gap:10px;margin-bottom:4px">
+              <span style="font-size:13px;opacity:0.8" id="cv2-admin-owner-display">${this._escHtml(data.creator_name || data.creator_email || '')}</span>
+            </div>
+            <button class="cv2-dialog-btn" id="cv2-admin-transfer-btn" style="margin-top:4px">
+              <span class="material-icons" style="font-size:16px;margin-right:4px">swap_horiz</span>Transfer ownership
+            </button>
+            <input type="hidden" id="cv2-preset-transfer-email" value="${this._escAttr(data.creator_email || '')}">
+
+            <div class="cv2-preset-row" style="margin-top:16px">
+              <label class="cv2-preset-cap-item" id="cv2-master-toggle-row">
+                <input type="checkbox" id="cv2-preset-is-master" ${data.is_master ? 'checked' : ''}>
+                <span class="material-icons" style="color:#D4A017">auto_awesome</span>
+                Master Droplet
+                <span style="margin-left:auto;font-size:11px;opacity:0.6">Always injected for eligible users</span>
+              </label>
+            </div>
+            <div class="cv2-preset-row" style="margin-top:4px">
+              <label class="cv2-preset-cap-item">
+                <input type="checkbox" id="cv2-preset-auto-discover" ${data.auto_discover ? 'checked' : ''}>
+                <span class="material-icons" style="color:#7B68EE">travel_explore</span>
+                Auto-Discover
+              </label>
+              <div id="cv2-auto-discover-when" style="margin-top:6px;padding-left:32px;${data.auto_discover ? '' : 'display:none'}">
+                <input type="text" class="cv2-preset-input" id="cv2-preset-auto-discover-when" value="${this._escAttr(data.auto_discover_when || '')}" placeholder="e.g. When the user asks about compliance, HR policies, ...">
+              </div>
+            </div>
+          </div>
+          ` : ''}
 
           <div class="cv2-preset-tab-content" data-tab="mcp" style="display:none">
             <div class="cv2-mcp-drop-zone" id="cv2-mcp-drop-zone">
@@ -613,6 +669,7 @@
 
     const closePreset = () => {
       overlay.remove();
+      this._openNudgeUid = null;
       if (onClose) {
         onClose();
       } else {
@@ -622,6 +679,9 @@
         this._closeActiveView = null;
       }
     };
+
+    // Track open nudge UID for pub status bar updates
+    if (type === 'nudge' && data.uid) this._openNudgeUid = data.uid;
 
     // Register as the active overlay teardown
     this._closeActiveView = closePreset;
@@ -734,6 +794,106 @@
           adWhen.style.display = adCb.checked ? '' : 'none';
         });
       }
+    }
+
+    // Admin: Transfer ownership dialog
+    overlay.querySelector('#cv2-admin-transfer-btn')?.addEventListener('click', () => {
+      const dlg = document.createElement('div');
+      dlg.className = 'cv2-dialog-overlay';
+      dlg.innerHTML = `
+        <div class="cv2-dialog">
+          <div class="cv2-dialog-body">
+            <label class="cv2-preset-label" style="margin-bottom:8px">New owner email</label>
+            <input type="email" class="cv2-preset-input" id="cv2-admin-transfer-input"
+                   value="${this._escAttr(overlay.querySelector('#cv2-preset-transfer-email').value)}"
+                   placeholder="user@example.com" style="width:100%">
+          </div>
+          <div class="cv2-dialog-actions">
+            <button class="cv2-dialog-btn cv2-dialog-cancel">${this.t('chat.cancel')}</button>
+            <button class="cv2-dialog-btn cv2-dialog-confirm">Transfer</button>
+          </div>
+        </div>`;
+      document.getElementById('chat-app').appendChild(dlg);
+      const input = dlg.querySelector('#cv2-admin-transfer-input');
+      input.focus();
+      input.select();
+      dlg.querySelector('.cv2-dialog-cancel').addEventListener('click', () => dlg.remove());
+      dlg.addEventListener('click', (e) => { if (e.target === dlg) dlg.remove(); });
+      dlg.querySelector('.cv2-dialog-confirm').addEventListener('click', () => {
+        const newEmail = input.value.trim();
+        if (newEmail) {
+          overlay.querySelector('#cv2-preset-transfer-email').value = newEmail;
+          overlay.querySelector('#cv2-admin-owner-display').textContent = newEmail;
+          // Update owner dropdown on Standard tab
+          const ownerSelect = overlay.querySelector('#cv2-preset-owner');
+          if (ownerSelect) {
+            const personalOpt = ownerSelect.querySelector('option[value=""]');
+            if (personalOpt) personalOpt.textContent = newEmail;
+          } else {
+            const ownerName = overlay.querySelector('.cv2-preset-user-name');
+            if (ownerName) ownerName.textContent = newEmail;
+          }
+        }
+        dlg.remove();
+      });
+    });
+
+    // ── i18n: language flag switcher for translatable fields ──
+    const i18nBar = overlay.querySelector('#cv2-i18n-bar');
+    const i18nTranslations = JSON.parse(JSON.stringify(data.translations || {})); // deep copy
+    let i18nLang = 'en-us'; // currently active editing locale
+    const i18nFields = { name: '#cv2-preset-name', description: '#cv2-preset-description', suggestions: '#cv2-preset-suggestions' };
+
+    if (i18nBar) {
+      const _i18nSave = () => {
+        // Save current field values into the right bucket
+        const nameEl = overlay.querySelector(i18nFields.name);
+        const descEl = overlay.querySelector(i18nFields.description);
+        const sugEl = overlay.querySelector(i18nFields.suggestions);
+        if (i18nLang === 'en-us') {
+          // Default language stored in main fields — no action needed (read directly on save)
+        } else {
+          if (!i18nTranslations[i18nLang]) i18nTranslations[i18nLang] = {};
+          if (nameEl) i18nTranslations[i18nLang].name = nameEl.value;
+          if (descEl) i18nTranslations[i18nLang].description = descEl.value;
+          if (sugEl) i18nTranslations[i18nLang].suggestions = sugEl.value;
+        }
+      };
+      const _i18nLoad = (lang) => {
+        const nameEl = overlay.querySelector(i18nFields.name);
+        const descEl = overlay.querySelector(i18nFields.description);
+        const sugEl = overlay.querySelector(i18nFields.suggestions);
+        if (lang === 'en-us') {
+          // Restore default fields from data (or current input values saved earlier)
+          if (nameEl) nameEl.value = nameEl.dataset.enUs ?? data.name ?? '';
+          if (descEl) descEl.value = descEl.dataset.enUs ?? data.description ?? '';
+          if (sugEl) sugEl.value = sugEl.dataset.enUs ?? (Array.isArray(data.suggestions) ? data.suggestions.join('\n') : (data.suggestions || ''));
+        } else {
+          const tr = i18nTranslations[lang] || {};
+          if (nameEl) nameEl.value = tr.name ?? '';
+          if (descEl) descEl.value = tr.description ?? '';
+          if (sugEl) sugEl.value = Array.isArray(tr.suggestions) ? tr.suggestions.join('\n') : (tr.suggestions ?? '');
+        }
+      };
+      i18nBar.querySelectorAll('.cv2-i18n-flag').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const newLang = btn.dataset.lang;
+          if (newLang === i18nLang) return;
+          // Save en-us defaults if leaving default locale
+          if (i18nLang === 'en-us') {
+            const nameEl = overlay.querySelector(i18nFields.name);
+            const descEl = overlay.querySelector(i18nFields.description);
+            const sugEl = overlay.querySelector(i18nFields.suggestions);
+            if (nameEl) nameEl.dataset.enUs = nameEl.value;
+            if (descEl) descEl.dataset.enUs = descEl.value;
+            if (sugEl) sugEl.dataset.enUs = sugEl.value;
+          }
+          _i18nSave();
+          i18nLang = newLang;
+          _i18nLoad(newLang);
+          i18nBar.querySelectorAll('.cv2-i18n-flag').forEach(f => f.classList.toggle('cv2-active', f.dataset.lang === newLang));
+        });
+      });
     }
 
     // State for icon
@@ -1546,9 +1706,43 @@
       // Sync CodeMirror editor content back to file array before saving
       _syncEditorBack();
 
+      // i18n: save current locale, switch to en-us so main fields contain defaults
+      if (i18nBar && i18nLang !== 'en-us') {
+        // Save current non-default locale
+        if (!i18nTranslations[i18nLang]) i18nTranslations[i18nLang] = {};
+        const nameEl = overlay.querySelector(i18nFields.name);
+        const descEl = overlay.querySelector(i18nFields.description);
+        const sugEl = overlay.querySelector(i18nFields.suggestions);
+        if (nameEl) i18nTranslations[i18nLang].name = nameEl.value;
+        if (descEl) i18nTranslations[i18nLang].description = descEl.value;
+        if (sugEl) i18nTranslations[i18nLang].suggestions = sugEl.value;
+        // Restore en-us into fields for the save readout
+        if (nameEl) nameEl.value = nameEl.dataset.enUs ?? data.name ?? '';
+        if (descEl) descEl.value = descEl.dataset.enUs ?? data.description ?? '';
+        if (sugEl) sugEl.value = sugEl.dataset.enUs ?? (Array.isArray(data.suggestions) ? data.suggestions.join('\n') : (data.suggestions || ''));
+      } else if (i18nBar && i18nLang === 'en-us') {
+        // Snapshot en-us values
+        const nameEl = overlay.querySelector(i18nFields.name);
+        const descEl = overlay.querySelector(i18nFields.description);
+        const sugEl = overlay.querySelector(i18nFields.suggestions);
+        if (nameEl) nameEl.dataset.enUs = nameEl.value;
+        if (descEl) descEl.dataset.enUs = descEl.value;
+        if (sugEl) sugEl.dataset.enUs = sugEl.value;
+      }
+
       const name = overlay.querySelector('#cv2-preset-name').value.trim();
       if (!name) {
         overlay.querySelector('#cv2-preset-name').style.borderColor = '#ef4444';
+        // Restore the locale fields if needed
+        if (i18nBar && i18nLang !== 'en-us') {
+          const tr = i18nTranslations[i18nLang] || {};
+          const nameEl = overlay.querySelector(i18nFields.name);
+          const descEl = overlay.querySelector(i18nFields.description);
+          const sugEl = overlay.querySelector(i18nFields.suggestions);
+          if (nameEl) nameEl.value = tr.name ?? '';
+          if (descEl) descEl.value = tr.description ?? '';
+          if (sugEl) sugEl.value = Array.isArray(tr.suggestions) ? tr.suggestions.join('\n') : (tr.suggestions ?? '');
+        }
         return;
       }
 
@@ -1567,6 +1761,14 @@
       };
       // Remove legacy nudge_type field
       delete saveData.nudge_type;
+      // i18n: attach translations (strip empty locales)
+      if (i18nBar) {
+        const cleanTr = {};
+        for (const [lang, tr] of Object.entries(i18nTranslations)) {
+          if (tr.name || tr.description || tr.suggestions) cleanTr[lang] = tr;
+        }
+        saveData.translations = Object.keys(cleanTr).length > 0 ? cleanTr : {};
+      }
       // Cache tool names for catalog display
       if (isMcp && mcpToolsEl) {
         const toolChips = mcpToolsEl.querySelectorAll('span[style*="monospace"]');
@@ -1619,10 +1821,11 @@
           saveData.creator_email = saveData.creator_email || this.config.userEmail || '';
           // Admin owner transfer
           const transferInput = overlay.querySelector('#cv2-preset-transfer-email');
-          if (transferInput && this.config.isAdmin) {
+          if (transferInput && this.hasPerm('nudge_admin')) {
             const newEmail = transferInput.value.trim();
-            if (newEmail) {
+            if (newEmail && newEmail.toLowerCase() !== (this.config.userEmail || '').toLowerCase()) {
               saveData.creator_email = newEmail;
+              saveData.creator_name = newEmail;
             }
           }
           // Admin-only flags
@@ -1639,14 +1842,24 @@
       if (type === 'nudge' && hasNudgeStore) {
         // Save to MongoDB via WS
         this.ws.send({ type: 'nudge_save', data: saveData });
+        // Restore editing locale (editor stays open)
+        if (i18nBar && i18nLang !== 'en-us') {
+          const tr = i18nTranslations[i18nLang] || {};
+          const nameEl = overlay.querySelector(i18nFields.name);
+          const descEl = overlay.querySelector(i18nFields.description);
+          const sugEl = overlay.querySelector(i18nFields.suggestions);
+          if (nameEl) nameEl.value = tr.name ?? '';
+          if (descEl) descEl.value = tr.description ?? '';
+          if (sugEl) sugEl.value = Array.isArray(tr.suggestions) ? tr.suggestions.join('\n') : (tr.suggestions ?? '');
+        }
       } else {
         await this._savePreset(saveData);
+        closePreset();
       }
-      closePreset();
     });
 
-    // Flush to live (nudge store only)
-    overlay.querySelector('#cv2-preset-flush')?.addEventListener('click', () => {
+    // Publish (status bar)
+    overlay.querySelector('#cv2-pub-publish')?.addEventListener('click', () => {
       const dlg = document.createElement('div');
       dlg.className = 'cv2-dialog-overlay';
       dlg.innerHTML = `
@@ -1663,6 +1876,50 @@
       dlg.querySelector('.cv2-dialog-confirm').addEventListener('click', () => {
         dlg.remove();
         this.ws.send({ type: 'nudge_flush', uid: data.uid });
+      });
+    });
+
+    // Unpublish (status bar)
+    overlay.querySelector('#cv2-pub-unpublish')?.addEventListener('click', () => {
+      const dlg = document.createElement('div');
+      dlg.className = 'cv2-dialog-overlay';
+      dlg.innerHTML = `
+        <div class="cv2-dialog">
+          <div class="cv2-dialog-body">${this.t('chat.nudge_unpublish_confirm') || 'Remove the published version?'}</div>
+          <div class="cv2-dialog-actions">
+            <button class="cv2-dialog-btn cv2-dialog-cancel">${this.t('chat.cancel')}</button>
+            <button class="cv2-dialog-btn cv2-dialog-confirm">${this.t('chat.nudge_unpublish') || 'Unpublish'}</button>
+          </div>
+        </div>`;
+      document.getElementById('chat-app').appendChild(dlg);
+      dlg.querySelector('.cv2-dialog-cancel').addEventListener('click', () => dlg.remove());
+      dlg.addEventListener('click', (e) => { if (e.target === dlg) dlg.remove(); });
+      dlg.querySelector('.cv2-dialog-confirm').addEventListener('click', () => {
+        dlg.remove();
+        this.ws.send({ type: 'nudge_unpublish', uid: data.uid });
+        closePreset();
+      });
+    });
+
+    // Revert (status bar)
+    overlay.querySelector('#cv2-pub-revert')?.addEventListener('click', () => {
+      const dlg = document.createElement('div');
+      dlg.className = 'cv2-dialog-overlay';
+      dlg.innerHTML = `
+        <div class="cv2-dialog">
+          <div class="cv2-dialog-body">${this.t('chat.nudge_revert_confirm') || 'Discard changes and revert to published version?'}</div>
+          <div class="cv2-dialog-actions">
+            <button class="cv2-dialog-btn cv2-dialog-cancel">${this.t('chat.cancel')}</button>
+            <button class="cv2-dialog-btn cv2-dialog-confirm">${this.t('chat.nudge_revert') || 'Revert'}</button>
+          </div>
+        </div>`;
+      document.getElementById('chat-app').appendChild(dlg);
+      dlg.querySelector('.cv2-dialog-cancel').addEventListener('click', () => dlg.remove());
+      dlg.addEventListener('click', (e) => { if (e.target === dlg) dlg.remove(); });
+      dlg.querySelector('.cv2-dialog-confirm').addEventListener('click', () => {
+        dlg.remove();
+        this.ws.send({ type: 'nudge_revert', uid: data.uid });
+        closePreset();
       });
     });
   },

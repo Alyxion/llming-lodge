@@ -33,6 +33,8 @@ Endpoints:
 
   POST /debug/sessions/{id}/doc — unified document control (browser + AI commands)
 
+  GET  /debug/sessions/{id}/console — browser console logs + MCP worker status
+
   GET  /debug/nudges           — list nudges (query, category, mode, pagination)
   GET  /debug/nudges/{uid}     — get full nudge by uid (create if not found)
   PUT  /debug/nudges/{uid}     — create or update nudge fields
@@ -40,6 +42,7 @@ Endpoints:
 """
 
 import ipaddress
+import json
 import logging
 import os
 import time
@@ -51,7 +54,7 @@ from pydantic import BaseModel
 from llming_lodge.server import API_PREFIX
 
 from llming_lodge.api.chat_session_api import _sync_pdf_viewer_mcp
-from llming_lodge.llm_base_models import Role
+from llming_models.llm_base_models import Role
 
 logger = logging.getLogger(__name__)
 
@@ -63,10 +66,19 @@ _ENABLED: bool = False
 
 
 def _load_config():
-    """Load config from env (called once at import, re-callable for tests)."""
+    """Load config from env. Called at import time and lazily on each request."""
     global _API_KEY, _IP_NETWORKS, _ENABLED
     _ENABLED = os.environ.get("DEBUG_CHAT_REMOTE", "0") == "1"
     _API_KEY = os.environ.get("DEBUG_CHAT_API_KEY", "")
+    # If key not found, try loading .env (module may have been imported before dotenv)
+    if not _API_KEY:
+        try:
+            from dotenv import load_dotenv
+            load_dotenv()
+            _API_KEY = os.environ.get("DEBUG_CHAT_API_KEY", "")
+            _ENABLED = os.environ.get("DEBUG_CHAT_REMOTE", "0") == "1"
+        except ImportError:
+            pass
     raw = os.environ.get("DEBUG_CHAT_IP_WHITELIST", "127.0.0.1,::1")
     _IP_NETWORKS = []
     for entry in raw.split(","):
@@ -84,6 +96,8 @@ _load_config()
 
 def _check_auth(request: Request):
     """FastAPI dependency: verify enabled + API key + IP whitelist."""
+    # Re-read config on each request (env vars may be set after module import)
+    _load_config()
     if not _ENABLED:
         raise HTTPException(404, "Not found")
 
@@ -167,10 +181,38 @@ def build_debug_router(*, nudge_store=None) -> APIRouter:
             })
         return {"count": len(sessions), "sessions": sessions}
 
+    # ── Current session (most recently active with WS) ─────
+
+    @router.get("/sessions/current")
+    async def get_current_session():
+        """Return the most recently active session that has a connected WebSocket."""
+        registry = SessionRegistry.get()
+        best_sid, best_entry = None, None
+        best_activity = -1.0
+        for sid, entry in registry._sessions.items():
+            if entry.websocket and entry.last_activity > best_activity:
+                best_sid, best_entry = sid, entry
+                best_activity = entry.last_activity
+        if not best_sid or not best_entry:
+            raise HTTPException(404, "No active session with connected WebSocket")
+        ctrl = best_entry.controller
+        msg_count = len(ctrl.session.history.messages) if ctrl.session else 0
+        return {
+            "session_id": best_sid,
+            "user_id": best_entry.user_id,
+            "user_name": best_entry.user_name,
+            "model": ctrl.model,
+            "streaming": bool(ctrl._streaming_task and not ctrl._streaming_task.done()),
+            "message_count": msg_count,
+            "title": ctrl._conversation_title,
+            "nudge_id": ctrl._nudge_id,
+            "project_id": ctrl._project_id,
+        }
+
     # ── Session detail ──────────────────────────────────────
 
     @router.get("/sessions/{session_id}")
-    async def get_session(session_id: str, include_history: bool = True):
+    async def get_session(session_id: str, include_history: bool = True, full: bool = False):
         registry = SessionRegistry.get()
         entry = registry.get_session(session_id)
         if not entry:
@@ -262,17 +304,42 @@ def build_debug_router(*, nudge_store=None) -> APIRouter:
             r.get("lang", "") for r in getattr(ctrl.session, "_mcp_client_renderers", [])
         ]
 
+        # Document store contents
+        doc_manager = entry.doc_manager
+        if doc_manager and hasattr(doc_manager, "store"):
+            docs = doc_manager.store.list_all()
+            result["documents"] = [
+                {
+                    "id": d.id,
+                    "type": d.type,
+                    "name": d.name,
+                    "version": d.version,
+                    "data_keys": list(d.data.keys()) if isinstance(d.data, dict) else type(d.data).__name__,
+                    "data_size": len(json.dumps(d.data, default=str)) if d.data else 0,
+                }
+                for d in docs
+            ]
+        else:
+            result["documents"] = []
+
         if include_history:
             messages = []
             for msg in ctrl.session.history.messages:
                 m = {
                     "role": msg.role.value if hasattr(msg.role, "value") else str(msg.role),
-                    "content": msg.content[:500] if msg.content else "",
+                    "content": msg.content if full else (msg.content[:500] if msg.content else ""),
                     "content_length": len(msg.content) if msg.content else 0,
                     "stale": msg.content_stale,
                     "has_images": bool(msg.images),
                     "image_count": len(msg.images) if msg.images else 0,
                 }
+                if full:
+                    tc_data = ctrl._message_tool_calls.get(id(msg))
+                    if tc_data:
+                        m["tool_calls"] = tc_data
+                    av_data = ctrl._message_avatar_overrides.get(id(msg))
+                    if av_data:
+                        m["avatar_override"] = av_data
                 messages.append(m)
             result["messages"] = messages
             result["message_count"] = len(messages)
@@ -302,12 +369,19 @@ def build_debug_router(*, nudge_store=None) -> APIRouter:
                 "images": req.images,
             })
 
-        # Run message intercept hook (dev MCPs, etc.) before sending to LLM
-        if req.text and not req.images and getattr(ctrl, "_on_message_intercept", None):
+        # Run built-in dev commands + app-specific intercept before sending to LLM
+        intercept_result = None
+        if req.text and not req.images:
+            from llming_lodge.dev.dev_commands import handle_dev_command
             try:
-                intercept_result = await ctrl._on_message_intercept(req.text, ctrl)
+                intercept_result = await handle_dev_command(req.text, ctrl)
             except Exception:
-                intercept_result = None
+                pass
+            if intercept_result is None and getattr(ctrl, "_on_message_intercept", None):
+                try:
+                    intercept_result = await ctrl._on_message_intercept(req.text, ctrl)
+                except Exception:
+                    pass
             if intercept_result is not None:
                 from llming_lodge.chat_controller import llm_manager
                 model_info = llm_manager.get_model_info(ctrl.model)
@@ -339,6 +413,58 @@ def build_debug_router(*, nudge_store=None) -> APIRouter:
             "text": req.text,
             "note": "Response streams via WebSocket to the connected browser",
         }
+
+    # ── Raw WS message forward ─────────────────────────────
+
+    @router.post("/sessions/{session_id}/ws_send")
+    async def ws_send(session_id: str, request: Request):
+        """Forward an arbitrary JSON message through the WS handler."""
+        registry = SessionRegistry.get()
+        entry = registry.get_session(session_id)
+        if not entry:
+            raise HTTPException(404, f"Session {session_id} not found")
+
+        from .chat_session_api import _handle_client_message
+        msg = await request.json()
+
+        # Capture any messages the controller sends back via WS
+        sent_messages = []
+        original_send = entry.controller._send
+
+        async def capture_send(payload):
+            sent_messages.append(payload)
+            return await original_send(payload)
+
+        entry.controller._send = capture_send
+        try:
+            await _handle_client_message(entry.controller, entry, msg)
+            # Give async tasks a moment to fire
+            import asyncio
+            await asyncio.sleep(0.1)
+        finally:
+            entry.controller._send = original_send
+
+        return {"status": "ok", "responses": sent_messages}
+
+    @router.post("/sessions/{session_id}/run_js")
+    async def run_js(session_id: str, request: Request):
+        """Execute JavaScript in the browser via ui_action run_js."""
+        registry = SessionRegistry.get()
+        entry = registry.get_session(session_id)
+        if not entry:
+            raise HTTPException(404, f"Session {session_id} not found")
+
+        body = await request.json()
+        code = body.get("code", "")
+        if not code:
+            raise HTTPException(400, "Missing 'code' field")
+
+        await entry.controller._send({
+            "type": "ui_action",
+            "action": "run_js",
+            "code": code,
+        })
+        return {"status": "ok"}
 
     # ── Check status ────────────────────────────────────────
 
@@ -1251,8 +1377,13 @@ def build_debug_router(*, nudge_store=None) -> APIRouter:
         mode: str = "",
         page: int = 0,
         page_size: int = 50,
+        as_user: str = "",
     ):
-        """List nudges from MongoDB. No session needed."""
+        """List nudges from MongoDB. No session needed.
+
+        Pass ``as_user=email`` to apply ACL filtering (shows only nudges
+        visible to that user).  Without it, returns all nudges unfiltered.
+        """
         store = _get_nudge_store()
         if not store:
             raise HTTPException(503, "Nudge store not available (no nudge_mongo_uri configured)")
@@ -1281,6 +1412,11 @@ def build_debug_router(*, nudge_store=None) -> APIRouter:
         results = []
         async for doc in cursor:
             doc.pop("_id", None)
+            if as_user:
+                if not store._user_can_see(doc, as_user):
+                    doc["_acl_visible"] = False
+                else:
+                    doc["_acl_visible"] = True
             results.append(doc)
 
         has_more = len(results) > page_size
@@ -1289,6 +1425,7 @@ def build_debug_router(*, nudge_store=None) -> APIRouter:
             "page": page,
             "page_size": page_size,
             "has_more": has_more,
+            **({"as_user": as_user} if as_user else {}),
         }
 
     @router.get("/nudges/{uid}")
@@ -1610,6 +1747,51 @@ def build_debug_router(*, nudge_store=None) -> APIRouter:
             return {"ok": False, "error": f"Timeout waiting for {command} result"}
         finally:
             ctrl._send = original_send
+
+    # ── Browser console logs ──────────────────────────────
+
+    @router.get("/sessions/{session_id}/console")
+    async def get_console_logs(
+        session_id: str,
+        level: str = "",
+        pattern: str = "",
+        since: int = 0,
+    ):
+        """Get captured browser console logs from the chat session.
+
+        Query params:
+          level   — filter by level: 'log', 'warn', 'error' (default: all)
+          pattern — regex filter on message text (case-insensitive)
+          since   — Unix timestamp (ms) — only return logs after this time
+
+        Also returns browser MCP worker status for debugging tool registration.
+        """
+        import asyncio
+
+        entry, ctrl = _ui_action_helper(session_id)
+
+        future = asyncio.get_event_loop().create_future()
+        ctrl._pending_console_logs = future
+
+        await ctrl._send({
+            "type": "ui_action",
+            "action": "get_console_logs",
+            "level": level,
+            "pattern": pattern,
+            "since": since,
+        })
+
+        try:
+            result = await asyncio.wait_for(future, timeout=5.0)
+            return {
+                "logs": result.get("logs", []),
+                "total_buffered": result.get("total", 0),
+                "workers": result.get("workers", {}),
+            }
+        except asyncio.TimeoutError:
+            return {"logs": [], "note": "Timeout waiting for browser response"}
+        finally:
+            ctrl._pending_console_logs = None
 
     logger.info("[DEBUG-API] Chat debug endpoints registered")
     return router

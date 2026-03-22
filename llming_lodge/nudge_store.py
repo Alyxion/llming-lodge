@@ -13,6 +13,16 @@ from uuid import uuid4
 logger = logging.getLogger(__name__)
 
 
+def _bump_version(version: str) -> str:
+    """Increment the patch component of a semver-ish version string."""
+    parts = version.split(".")
+    try:
+        parts[-1] = str(int(parts[-1]) + 1)
+    except (ValueError, IndexError):
+        return version
+    return ".".join(parts)
+
+
 # ------------------------------------------------------------------
 # In-memory file cache (shared across all sessions)
 # ------------------------------------------------------------------
@@ -204,7 +214,7 @@ class NudgeStore:
     """CRUD + search + favorites for nudges stored in MongoDB.
 
     Follows the lazy-init pattern from MongoDBBudgetLimit — the async
-    MongoDB client is created on first use via ``nice_droplets.utils.mongo_helpers``.
+    MongoDB client is created on first use via ``llming_lodge._mongo``.
     """
 
     COLLECTION = "nudges"
@@ -227,7 +237,7 @@ class NudgeStore:
 
     def _ensure_colls(self):
         if self._coll is None:
-            from nice_droplets.utils.mongo_helpers import get_async_mongo_client
+            from llming_models.budget._mongo import get_async_mongo_client
             client = get_async_mongo_client(self._mongo_uri)
             db = client[self._mongo_db]
             self._coll = db[self.COLLECTION]
@@ -286,7 +296,10 @@ class NudgeStore:
         visibility = doc.get("visibility", [])
         if not visibility:
             return False
-        return any(fnmatch(email, pat) for pat in visibility)
+        return any(
+            fnmatch(email, pat.lower() if pat.startswith("*") else f"*{pat.lower()}")
+            for pat in visibility
+        )
 
     @staticmethod
     def _user_can_edit(doc: dict, user_email: str, user_teams: list[dict] | None = None) -> bool:
@@ -324,6 +337,12 @@ class NudgeStore:
         if existing and not is_admin and not self._user_can_edit(existing, user_email, user_teams):
             raise PermissionError("Only the creator or team editor can update this nudge")
 
+        # Auto-increment version on dev saves (patch bump)
+        if mode == "dev" and existing:
+            data["version"] = _bump_version(existing.get("version", "0.0.0"))
+        elif "version" not in data:
+            data["version"] = "0.0.1"
+
         # Strip text_content from files before persisting — it will be
         # extracted on-the-fly when the nudge is loaded into a chat session.
         for f in data.get("files") or []:
@@ -358,17 +377,17 @@ class NudgeStore:
             return None
         return doc
 
-    async def get_for_user(self, uid: str, user_email: str, user_teams: list[dict] | None = None) -> dict | None:
-        """Return dev version for the creator/team editor, live for others."""
+    async def get_for_user(self, uid: str, user_email: str, user_teams: list[dict] | None = None, *, is_admin: bool = False) -> dict | None:
+        """Return dev version for the creator/team editor/admin, live for others."""
         await self._ensure_indexes()
         coll, _ = self._ensure_colls()
 
-        # Try dev first — if user can edit, return it
+        # Try dev first — if user can edit (or is admin), return it
         dev = await coll.find_one({"uid": uid, "mode": "dev"})
         if dev:
             dev.pop("_id", None)
             self._cache_set(uid, "dev", dev)
-            if self._user_can_edit(dev, user_email, user_teams):
+            if is_admin or self._user_can_edit(dev, user_email, user_teams):
                 return dev
 
         # Otherwise return live if visible
@@ -376,12 +395,12 @@ class NudgeStore:
         if live:
             live.pop("_id", None)
             self._cache_set(uid, "live", live)
-            if self._user_can_see(live, user_email, user_teams):
+            if is_admin or self._user_can_see(live, user_email, user_teams):
                 return live
 
         return None
 
-    async def flush_to_live(self, uid: str, user_email: str, user_teams: list[dict] | None = None) -> bool:
+    async def flush_to_live(self, uid: str, user_email: str, user_teams: list[dict] | None = None, *, is_admin: bool = False) -> bool:
         """Copy all fields from dev to live. Creator or team editor/owner."""
         await self._ensure_indexes()
         coll, _ = self._ensure_colls()
@@ -389,13 +408,52 @@ class NudgeStore:
         dev = await coll.find_one({"uid": uid, "mode": "dev"})
         if not dev:
             return False
-        if not self._user_can_edit(dev, user_email, user_teams):
+        if not is_admin and not self._user_can_edit(dev, user_email, user_teams):
             raise PermissionError("Only the creator or team editor can publish")
 
         live_doc = {k: v for k, v in dev.items() if k not in ("_id", "mode")}
         live_doc["mode"] = "live"
         await coll.replace_one(
             {"uid": uid, "mode": "live"}, live_doc, upsert=True,
+        )
+        self._cache_evict(uid)
+        get_file_cache().evict(uid)
+        return True
+
+    async def unpublish(self, uid: str, user_email: str, user_teams: list[dict] | None = None, *, is_admin: bool = False) -> bool:
+        """Delete the live version of a nudge. Creator or team editor/owner."""
+        await self._ensure_indexes()
+        coll, _ = self._ensure_colls()
+
+        dev = await coll.find_one({"uid": uid, "mode": "dev"})
+        if not dev:
+            return False
+        if not is_admin and not self._user_can_edit(dev, user_email, user_teams):
+            raise PermissionError("Only the creator or team editor can unpublish")
+
+        result = await coll.delete_one({"uid": uid, "mode": "live"})
+        self._cache_evict(uid)
+        get_file_cache().evict(uid)
+        return result.deleted_count > 0
+
+    async def revert_to_live(self, uid: str, user_email: str, user_teams: list[dict] | None = None, *, is_admin: bool = False) -> bool:
+        """Copy live fields back to dev, discarding dev changes. Creator or team editor/owner."""
+        await self._ensure_indexes()
+        coll, _ = self._ensure_colls()
+
+        live = await coll.find_one({"uid": uid, "mode": "live"})
+        if not live:
+            return False
+        dev = await coll.find_one({"uid": uid, "mode": "dev"})
+        if not dev:
+            return False
+        if not is_admin and not self._user_can_edit(dev, user_email, user_teams):
+            raise PermissionError("Only the creator or team editor can revert")
+
+        dev_doc = {k: v for k, v in live.items() if k not in ("_id", "mode")}
+        dev_doc["mode"] = "dev"
+        await coll.replace_one(
+            {"uid": uid, "mode": "dev"}, dev_doc, upsert=True,
         )
         self._cache_evict(uid)
         get_file_cache().evict(uid)

@@ -1,4 +1,4 @@
-"""Standalone HTTPS chat server — run llming-lodge without NiceGUI or any host app.
+"""Standalone HTTPS chat server — run llming-lodge without any host app.
 
 Usage::
 
@@ -99,7 +99,13 @@ def create_app():
     from fastapi.staticfiles import StaticFiles
 
     from llming_lodge.api.chat_session_api import SessionRegistry, WebSocketChatController
-    from llming_lodge.server import get_static_path, get_chat_static_path, get_ws_router, API_PREFIX, STATIC_PREFIX
+    from llming_lodge.chat_page import ChatPage, build_chat_html, start_dev_file_watcher
+    from llming_lodge.chat_config import ChatAppConfig
+    from llming_lodge.server import (
+        get_static_path, get_chat_static_path, get_ws_router,
+        API_PREFIX, STATIC_PREFIX, sign_auth_token,
+        AUTH_COOKIE_NAME, SESSION_COOKIE_NAME,
+    )
 
     @asynccontextmanager
     async def lifespan(_a):
@@ -109,6 +115,10 @@ def create_app():
                 await asyncio.sleep(60)
                 SessionRegistry.get().cleanup_expired(ttl=600)
         task = asyncio.create_task(_cleanup())
+
+        # Start dev file watcher for hot-reload
+        await start_dev_file_watcher()
+
         yield
         task.cancel()
 
@@ -117,50 +127,6 @@ def create_app():
     _app.mount(STATIC_PREFIX, StaticFiles(directory=get_static_path()), name="llming-static")
     _app.mount("/chat-static", StaticFiles(directory=get_chat_static_path()), name="chat-static")
     _app.include_router(get_ws_router())
-
-    index_html = """<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Chat</title>
-    <script>window.__CHAT_CONFIG__ = {config_json};</script>
-    <link rel="stylesheet" href="/chat-static/vendor/material-icons.css">
-    <link rel="stylesheet" href="/chat-static/chat-core.css">
-    <link rel="stylesheet" href="/chat-static/chat-sidebar.css">
-    <link rel="stylesheet" href="/chat-static/chat-messages.css">
-    <link rel="stylesheet" href="/chat-static/chat-input.css">
-    <link rel="stylesheet" href="/chat-static/chat-welcome.css">
-    <link rel="stylesheet" href="/chat-static/chat-voice.css">
-    <link rel="stylesheet" href="/chat-static/chat-presets.css">
-    <link rel="stylesheet" href="/chat-static/chat-nudges.css">
-    <link rel="stylesheet" href="/chat-static/chat-documents.css">
-    <link rel="stylesheet" href="/chat-static/vendor/katex.min.css">
-    <script src="/chat-static/vendor/marked.min.js"></script>
-    <script src="/chat-static/vendor/purify.min.js"></script>
-    <script src="/chat-static/vendor/katex.min.js"></script>
-    <style>
-        html, body { margin: 0; padding: 0; height: 100%; background: #1a1a2e; }
-    </style>
-</head>
-<body>
-    <div id="chat-app" style="position:fixed;inset:0;z-index:9999;"></div>
-    <script src="/chat-static/chat-features.js"></script>
-    <script src="/chat-static/chat-idb.js"></script>
-    <script src="/chat-static/chat-ws.js"></script>
-    <script src="/chat-static/chat-markdown.js"></script>
-    <script src="/chat-static/chat-sidebar.js" defer></script>
-    <script src="/chat-static/chat-messages.js" defer></script>
-    <script src="/chat-static/chat-images.js" defer></script>
-    <script src="/chat-static/chat-plus-menu.js" defer></script>
-    <script src="/chat-static/chat-voice.js" defer></script>
-    <script src="/chat-static/chat-realtime.js" defer></script>
-    <script src="/chat-static/chat-documents.js" defer></script>
-    <script src="/chat-static/chat-nudges.js" defer></script>
-    <script src="/chat-static/chat-presets.js" defer></script>
-    <script src="/chat-static/chat-app-core.js" defer></script>
-</body>
-</html>"""
 
     @_app.get("/", response_class=HTMLResponse)
     async def index():
@@ -174,7 +140,7 @@ def create_app():
         )
 
         registry = SessionRegistry.get()
-        registry.register(
+        entry = registry.register_session(
             session_id=session_id,
             controller=controller,
             user_id="standalone",
@@ -192,7 +158,27 @@ def create_app():
             "staticBase": STATIC_PREFIX,
         }
 
-        return HTMLResponse(index_html.replace("{config_json}", json.dumps(config)))
+        config_json = json.dumps(config)
+
+        # Store config on entry for the chat page route
+        entry._frontend_config_json = config_json
+        entry._frontend_renderers_json = "[]"
+        entry._app_title = "Chat"
+
+        html = build_chat_html(config_json, "[]", "Chat")
+
+        # Set auth + session cookies on response
+        token = sign_auth_token(session_id)
+        response = HTMLResponse(html)
+        response.set_cookie(
+            AUTH_COOKIE_NAME, token,
+            path="/", max_age=86400, samesite="lax",
+        )
+        response.set_cookie(
+            SESSION_COOKIE_NAME, session_id,
+            path="/", max_age=86400, samesite="lax", httponly=True,
+        )
+        return response
 
     return _app
 

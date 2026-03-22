@@ -4,7 +4,7 @@ import json
 import logging
 from typing import Any, Dict, List
 
-from llming_lodge.tools.mcp import InProcessMCPServer
+from llming_models.tools.mcp import InProcessMCPServer
 from llming_lodge.doc_plugins.document_store import DocumentSessionStore
 
 logger = logging.getLogger(__name__)
@@ -34,7 +34,8 @@ class DocumentCreatorMCP(InProcessMCPServer):
                     "- plotly: {data: [...], layout: {...}}\n"
                     "- latex: {formula: '...'}\n"
                     "- table: {columns: [...], rows: [...]}  (for spreadsheets / data tables)\n"
-                    "- text_doc: {sections: [{id, type, content, ...}]}  (for text documents / DOCX)\n"
+                    "- text_doc: {sections: [{id, type, content, ...}]}  (for text documents / DOCX). "
+                    "Use {type: 'embed', $ref: '<doc-id>'} sections to embed charts/tables by reference.\n"
                     "- presentation: {slides: [{id, title, elements: [...]}]}  (for presentations; optional \"template\" field for branded styling)\n"
                     "- html: {html: '', css: '', js: '', title: ''}\n"
                     "- email_draft: {subject: '', to: [...], cc: [...], bcc: [...], body_html: '', attachments: [{ref, name}]}\n"

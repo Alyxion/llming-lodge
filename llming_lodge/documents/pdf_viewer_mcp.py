@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Union
 
 from llming_lodge.documents.image_registry import ImageEntry, ImageRegistry
-from llming_lodge.tools.mcp import InProcessMCPServer
+from llming_models.tools.mcp import InProcessMCPServer
 
 logger = logging.getLogger(__name__)
 

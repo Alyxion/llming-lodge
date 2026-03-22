@@ -540,6 +540,32 @@
   .cv2-ivb-ptt-hint { display: none; }
 }
 
+/* On mobile, hide inline PTT button + status text (big mic replaces it) */
+@media (max-width: 600px) {
+  .cv2-voice-active-mobile .cv2-ivb-ptt { display: none !important; }
+  .cv2-voice-active-mobile .cv2-ivb-status { display: none !important; }
+  /* Hide send button on mobile — releasing the mic button sends */
+  .cv2-voice-active-mobile .cv2-ivb-send { display: none !important; }
+  /* Shrink wave so it never extends under the mic button */
+  .cv2-voice-active-mobile .cv2-ivb-info { margin-right: 80px; }
+  /* Responding phase: show interrupt button at mic button location */
+  .cv2-voice-active-mobile .cv2-inline-voice-bar.cv2-speech-responding .cv2-ivb-interrupt {
+    position: fixed;
+    bottom: 16px;
+    right: 78px;
+    width: 56px;
+    height: 56px;
+    border-radius: 50%;
+    background: rgba(245, 158, 11, 0.85);
+    color: #fff;
+    z-index: 10001;
+    box-shadow: 0 4px 24px rgba(245, 158, 11, 0.4);
+  }
+  .cv2-voice-active-mobile .cv2-inline-voice-bar.cv2-speech-responding .cv2-ivb-interrupt .material-icons {
+    font-size: 26px;
+  }
+}
+
 /* ── Realtime API (Live Voice) Dialog ────────────── */
 
 .cv2-realtime-overlay {

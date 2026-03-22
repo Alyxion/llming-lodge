@@ -1,12 +1,27 @@
 """Server integration helpers (framework-agnostic).
 
 Host apps call these to register static assets and API routes.
+
+**No NiceGUI dependency.**  Auth cookies are set either via HTTP
+``Set-Cookie`` headers or via the host app's own mechanism.
 """
 
 import os
 import logging
 import threading
 from typing import Optional
+
+# Auth — delegated to llming-com shared library
+from llming_com.auth import (  # noqa: F401 — re-exported for backward compat
+    AUTH_COOKIE_NAME,
+    SESSION_COOKIE_NAME,
+    IDENTITY_COOKIE_NAME,
+    sign_auth_token,
+    verify_auth_cookie,
+    sign_identity_token,
+    verify_identity_cookie,
+    make_auth_cookie_value,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -197,12 +212,43 @@ def build_http_router():
     from fastapi.responses import Response
     from pydantic import BaseModel
 
+    from fastapi.responses import JSONResponse
     from llming_lodge.documents import UploadManager
     from llming_lodge.api.chat_session_api import SessionRegistry, _handle_client_message
+    import llming_lodge.api.chat_session_api as _chat_api
 
     router = APIRouter(prefix=API_PREFIX)
 
+    # ---- Rich MCP render spec fetch ----
+
+    @router.get("/rich-render/{render_id}")
+    async def get_rich_render(render_id: str):
+        """Fetch a stored rich MCP render spec by UUID."""
+        coll = _chat_api._rich_mcp_coll_cache
+        if coll is None:
+            # Try to initialize from any active session
+            reg = SessionRegistry.get()
+            for entry in (reg._sessions.values() if hasattr(reg, '_sessions') else []):
+                coll = _chat_api._get_rich_mcp_coll(entry.controller)
+                if coll:
+                    break
+        if coll is None:
+            return JSONResponse({"error": "not_available"}, status_code=503)
+        doc = await coll.find_one({"_id": render_id})
+        if not doc:
+            return JSONResponse({"error": "not_found"}, status_code=404)
+        render = doc.get("render", {})
+        render["version"] = doc.get("version", "1.0")
+        return JSONResponse(render)
+
     # ---- File uploads ----
+
+    # MIME types that support text extraction fallback for oversized files
+    _EXTRACTABLE_MIMES = {
+        "application/pdf",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    }
+    _MAX_EXTRACTABLE_SIZE = 50 * 1024 * 1024  # 50 MB hard ceiling for extraction
 
     @router.post("/upload/{session_id}")
     async def upload_files(
@@ -216,8 +262,37 @@ def build_http_router():
         results = []
         for f in files:
             content = await f.read()
-            if len(content) > UploadManager.max_file_size:
+            mime = UploadManager._guess_mime(f.filename or "")
+            oversized = len(content) > UploadManager.max_file_size
+
+            if oversized:
+                # Text extraction fallback for PDFs and DOCX
+                if mime in _EXTRACTABLE_MIMES and len(content) <= _MAX_EXTRACTABLE_SIZE:
+                    from llming_lodge.documents.extract import extract_text
+                    try:
+                        extracted = extract_text(content, mime)
+                    except Exception as exc:
+                        raise HTTPException(413,
+                            f"File too large ({len(content) / (1024*1024):.1f} MB) "
+                            f"and text extraction failed: {exc}")
+                    if not extracted or extracted.startswith("[Error"):
+                        raise HTTPException(413,
+                            f"File too large ({len(content) / (1024*1024):.1f} MB) "
+                            f"and text could not be extracted.")
+                    # Store as text-only (no raw_data → saves memory)
+                    att = await mgr.store_extracted(
+                        f.filename or "document", extracted, mime, x_user_id,
+                    )
+                    results.append({
+                        "name": att.name,
+                        "size": att.size,
+                        "fileId": att.file_id,
+                        "mimeType": att.mime_type,
+                        "extractedText": True,
+                    })
+                    continue
                 raise HTTPException(413, f"File too large: {f.filename}")
+
             try:
                 att = await mgr.store_file(f.filename, content, x_user_id)
             except ValueError as e:
@@ -375,7 +450,7 @@ def build_http_router():
         if not template or not getattr(template, "template_path", ""):
             raise HTTPException(400, f"Template '{template_name}' not found or has no template_path")
 
-        from llming_lodge.doc_plugins.pptx_exporter import export_pptx as _export_pptx
+        from llming_docs.pptx_exporter import export_pptx as _export_pptx
 
         template_config = template.model_dump(by_alias=True)
         pptx_bytes = await _aio.to_thread(
@@ -399,7 +474,7 @@ def build_http_router():
         data = await request.json()
         spec = data.get("spec", {})
 
-        from llming_lodge.doc_plugins.word_exporter import export_docx as _export_docx
+        from llming_docs.word_exporter import export_docx as _export_docx
 
         docx_bytes = await _aio.to_thread(_export_docx, spec)
 
@@ -408,6 +483,80 @@ def build_http_router():
             content=docx_bytes,
             media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             headers={"Content-Disposition": f'attachment; filename="{filename}.docx"'},
+        )
+
+    # ---- Unified document export ----
+
+    @router.post("/doc/export/{session_id}")
+    async def export_document(session_id: str, request: Request):
+        """Unified document export endpoint.
+
+        Accepts either:
+          {"doc_id": "...", "format": "docx|pptx|xlsx|csv|html|png", "chart_images": {...}}
+        or:
+          {"spec": {...}, "type": "table", "format": "xlsx", "chart_images": {...}}
+        """
+        import asyncio as _aio
+
+        from llming_docs.render import (
+            RenderContext, render_to as _render_to, can_render as _can_render,
+        )
+
+        data = await request.json()
+        target_format = data.get("format", "")
+        chart_images = data.get("chart_images") or data.get("chartImages") or {}
+        spec = data.get("spec")
+        doc_type = data.get("type", "")
+
+        if not spec:
+            raise HTTPException(400, "Missing 'spec' in request body")
+        if not doc_type:
+            raise HTTPException(400, "Missing 'type' in request body")
+        if not target_format:
+            raise HTTPException(400, "Missing 'format' in request body")
+
+        # Resolve type aliases
+        _aliases = {"word": "text_doc", "powerpoint": "presentation", "pptx": "presentation"}
+        doc_type = _aliases.get(doc_type, doc_type)
+
+        if not _can_render(doc_type, target_format):
+            raise HTTPException(400, f"Cannot render '{doc_type}' to '{target_format}'")
+
+        # Build context
+        template_path = None
+        template_config = None
+        if doc_type == "presentation":
+            template_name = spec.get("template", "")
+            registry = SessionRegistry.get()
+            template = None
+            entry = registry.get_session(session_id)
+            if entry:
+                doc_manager = getattr(entry, "doc_manager", None)
+                if doc_manager and template_name:
+                    for tpl in getattr(doc_manager, "presentation_templates", []):
+                        if getattr(tpl, "name", "") == template_name:
+                            template = tpl
+                            break
+            if not template and template_name:
+                template = registry.get_template(template_name)
+            if not template or not getattr(template, "template_path", ""):
+                raise HTTPException(400, f"Template '{template_name}' not found")
+            template_path = template.template_path
+            template_config = template.model_dump(by_alias=True)
+
+        ctx = RenderContext(
+            chart_images=chart_images,
+            template_path=template_path,
+            template_config=template_config,
+            session_id=session_id,
+        )
+
+        result = await _aio.to_thread(_render_to, doc_type, spec, target_format, ctx)
+
+        return Response(
+            content=result.data,
+            media_type=result.content_type,
+            headers={"Content-Disposition": f'attachment; filename="{result.filename}"'},
         )
 
     # ---- WebSocket echo (debug) ----
@@ -486,6 +635,9 @@ def build_http_router():
         finally:
             controller.set_websocket(None)
             entry.websocket = None
+            # Full session cleanup (nudges, MCP, uploads, doc plugins)
+            from llming_lodge.chat_page import cleanup_session as _cleanup
+            await _cleanup(session_id)
 
     return router
 
@@ -502,7 +654,14 @@ def setup_routes(app, *, debug: bool = False, nudge_store=None) -> None:
     """Mount all llming-lodge routes (static files + API) on a Starlette/FastAPI app.
 
     Framework-agnostic — works with any app that supports ``.mount()``
-    and ``.include_router()`` (FastAPI, Starlette, NiceGUI).
+    and ``.include_router()`` (FastAPI, Starlette).
+
+    Mounts:
+    - Static files (chat assets)
+    - HTTP + WebSocket API router
+    - Debug API (if ``debug=True`` and ``DEBUG_CHAT_API_KEY`` env var is set)
+    - Dev dashboard (if ``LLMING_DEV_PASSWORD`` env var is set)
+    - Public API — droplets + remote chat (if ``nudge_store`` is provided)
     """
     from starlette.staticfiles import StaticFiles
 
@@ -517,3 +676,50 @@ def setup_routes(app, *, debug: bool = False, nudge_store=None) -> None:
             app.include_router(build_debug_router(nudge_store=nudge_store))
         except Exception as e:
             logger.warning(f"[CHAT] Failed to load debug API: {e}")
+
+        # Command-based debug API + MCP server (new system, runs alongside legacy)
+        try:
+            from llming_lodge.api.chat_session_api import SessionRegistry
+            import llming_com.base_commands  # noqa: F401 — register base commands
+            import llming_lodge.api.commands  # noqa: F401 — register lodge commands
+
+            from llming_com.command_router import build_command_router
+            from llming_lodge.api.debug_api import _check_auth
+            cmd_router = build_command_router(
+                SessionRegistry.get(),
+                auth_dependency=_check_auth,
+                prefix=f"{API_PREFIX}/debug/v2",
+                extras={"nudge_store": nudge_store},
+            )
+            app.include_router(cmd_router)
+
+            from llming_com.mcp_http_server import mount_mcp_server
+            mount_mcp_server(
+                app, SessionRegistry.get(),
+                prefix=f"{API_PREFIX}/mcp",
+                extras={"nudge_store": nudge_store},
+            )
+        except Exception as e:
+            logger.warning(f"[CHAT] Failed to load command API / MCP: {e}")
+
+    # Dev dashboard — requires LLMING_DEV_PASSWORD env var
+    if os.environ.get("LLMING_DEV_PASSWORD", ""):
+        try:
+            from llming_lodge.api.dev_dashboard import build_dev_router, mount_dev_static
+            dev_router = build_dev_router()
+            if dev_router:
+                app.include_router(dev_router)
+                mount_dev_static(app)
+                logger.info("[DEV] Dev dashboard mounted")
+        except Exception as e:
+            logger.warning(f"[DEV] Failed to load dev dashboard: {e}")
+
+    # Public API — droplets + remote chat (auth via user API keys)
+    if nudge_store:
+        try:
+            from llming_lodge.api.public_api import build_public_api_router
+            pub_router = build_public_api_router(nudge_store)
+            app.include_router(pub_router)
+            logger.info(f"[PUBLIC_API] Mounted public API with {len(pub_router.routes)} routes")
+        except Exception as e:
+            logger.warning(f"[PUBLIC_API] Failed to load public API: {e}")

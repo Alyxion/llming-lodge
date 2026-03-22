@@ -4,7 +4,7 @@ import json
 import logging
 from typing import Any, Dict, List
 
-from llming_lodge.tools.mcp import InProcessMCPServer
+from llming_models.tools.mcp import InProcessMCPServer
 from llming_lodge.doc_plugins.document_store import DocumentSessionStore
 
 logger = logging.getLogger(__name__)

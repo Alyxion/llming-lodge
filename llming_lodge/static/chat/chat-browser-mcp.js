@@ -165,6 +165,19 @@ self._registerMcpTool = (name, desc, schema, handler) => {
   _tools[name] = { name, description: desc, inputSchema: schema, handler };
 };
 
+// Register bolt definitions from within the Worker.
+// Bolts are forwarded to the main thread for execution.
+self._registerBolts = (bolts) => {
+  self.postMessage({ type: 'register_bolts', bolts });
+};
+
+// Register bolt handlers — functions the main thread can invoke
+// for bolt actions of type 'worker_decode'.
+const _boltHandlers = {};
+self._registerBoltHandler = (name, fn) => {
+  _boltHandlers[name] = fn;
+};
+
 // Stub MCP SDK schema constants so setRequestHandler can identify them
 const ListToolsRequestSchema = { method: 'tools/list' };
 const CallToolRequestSchema = { method: 'tools/call' };
@@ -263,9 +276,24 @@ self.onmessage = async (e) => {
         const result = await tool.handler(msg.arguments);
         resultStr = _unwrapResult(result);
       }
-      self.postMessage({ type: 'tool_result', callId: msg.callId, result: resultStr });
+      let _isRich = false;
+      try { _isRich = !!JSON.parse(resultStr).__rich_mcp__; } catch(_) {}
+      self.postMessage({ type: 'tool_result', callId: msg.callId, result: resultStr, rich_mcp: _isRich });
     } catch (err) {
-      self.postMessage({ type: 'tool_result', callId: msg.callId, error: err.message || String(err) });
+      self.postMessage({ type: 'tool_result', callId: msg.callId, error: err.message || String(err), rich_mcp: false });
+    }
+  } else if (msg.type === 'bolt_decode') {
+    // Invoke a registered bolt handler and return the result
+    const handler = _boltHandlers[msg.handler];
+    if (!handler) {
+      self.postMessage({ type: 'bolt_decode_result', callId: msg.callId, error: 'Unknown handler: ' + msg.handler });
+    } else {
+      try {
+        const result = await handler(msg.input);
+        self.postMessage({ type: 'bolt_decode_result', callId: msg.callId, result });
+      } catch (err) {
+        self.postMessage({ type: 'bolt_decode_result', callId: msg.callId, error: err.message || String(err) });
+      }
     }
   } else if (msg.type === '_get_tests') {
     self.postMessage({ type: '_tests', tests: self._tests || null });
@@ -288,7 +316,8 @@ self.onmessage = async (e) => {
 
       // -- Process entry point: rewrite to use _registerMcpTool --
       parts.push(`\n// === Entry Point: ${entryPoint} ===`);
-      parts.push(this._rewriteEntryPoint(files[entryPoint] || '', entryPoint));
+      const rewrittenEntry = this._rewriteEntryPoint(files[entryPoint] || '', entryPoint);
+      parts.push(rewrittenEntry);
 
       return parts.join('\n');
     },
@@ -466,11 +495,17 @@ self.onmessage = async (e) => {
       worker.onmessage = (e) => {
         const msg = e.data;
 
+        // Handle bolt registration during init phase too
+        if (msg.type === 'register_bolts' && Array.isArray(msg.bolts)) {
+          this._boltsRegister(nudgeUid, msg.bolts);
+          return;
+        }
+
         if (msg.type === 'mcp_ready') {
           clearTimeout(timeout);
           console.log(`[BROWSER_MCP] Worker ready for ${nudgeUid}: ${msg.tools.length} tools`);
 
-          // Set up permanent message handler for tool results
+          // Set up permanent message handler for tool results + bolt registration
           worker.onmessage = (e2) => {
             const res = e2.data;
             if (res.type === 'tool_result') {
@@ -479,11 +514,23 @@ self.onmessage = async (e) => {
                 const { requestId: reqId } = entry.pendingCalls[res.callId];
                 delete entry.pendingCalls[res.callId];
 
+                // Send result to server — rich_mcp envelope passes through for server-side storage
                 this.ws.send({
                   type: 'browser_mcp_result',
                   request_id: reqId,
                   ...(res.error ? { error: res.error } : { result: res.result }),
                 });
+              }
+            } else if (res.type === 'register_bolts' && Array.isArray(res.bolts)) {
+              // JS droplet registering bolts from within the Worker
+              this._boltsRegister(nudgeUid, res.bolts);
+            } else if (res.type === 'bolt_decode_result') {
+              // Resolve a pending bolt decode call
+              const entry = (this._mcpWorkers || {})[nudgeUid];
+              const cb = entry && entry.pendingBoltDecodes && entry.pendingBoltDecodes[res.callId];
+              if (cb) {
+                delete entry.pendingBoltDecodes[res.callId];
+                cb(res);
               }
             }
           };
@@ -539,6 +586,122 @@ self.onmessage = async (e) => {
     },
 
     /**
+     * Send a bolt decode request to a Worker and return a Promise with the result.
+     * @param {string} nudgeUid - The nudge that owns the Worker
+     * @param {string} handlerName - Name of the registered bolt handler
+     * @param {string} input - User input to decode
+     * @returns {Promise<object>} Resolved with { result } or { error }
+     */
+    _callWorkerBoltDecode(nudgeUid, handlerName, input) {
+      const entry = (this._mcpWorkers || {})[nudgeUid];
+      if (!entry) return Promise.resolve({ error: 'No active Worker for ' + nudgeUid });
+
+      if (!entry.pendingBoltDecodes) entry.pendingBoltDecodes = {};
+      const callId = crypto.randomUUID();
+
+      return new Promise((resolve) => {
+        entry.pendingBoltDecodes[callId] = resolve;
+        entry.worker.postMessage({ type: 'bolt_decode', callId, handler: handlerName, input });
+        // Timeout after 5s
+        setTimeout(() => {
+          if (entry.pendingBoltDecodes[callId]) {
+            delete entry.pendingBoltDecodes[callId];
+            resolve({ error: 'Bolt decode timed out (5s)' });
+          }
+        }, 5000);
+      });
+    },
+
+    /**
+     * Show an inline trust prompt below a rich MCP visualization.
+     * Displayed when a droplet wants to inject messages or trigger LLM calls.
+     */
+    _showTrustPrompt(nudgeUid, rich, parentEl) {
+      const prompt = document.createElement('div');
+      prompt.className = 'cv2-rich-mcp-trust-prompt';
+      const actions = [];
+      if (rich.inject_messages) actions.push('add messages to the conversation');
+      if (rich.trigger_llm_call) actions.push('trigger a follow-up AI response');
+      prompt.innerHTML = `
+        <div class="cv2-trust-prompt-text">
+          <span class="material-icons cv2-trust-prompt-icon">security</span>
+          This droplet wants to ${actions.join(' and ')}.
+        </div>
+        <div class="cv2-trust-prompt-actions">
+          <button class="cv2-trust-btn cv2-trust-btn-allow" data-action="once">Allow once</button>
+          <button class="cv2-trust-btn cv2-trust-btn-always" data-action="always">Always trust</button>
+          <button class="cv2-trust-btn cv2-trust-btn-deny" data-action="deny">Deny</button>
+        </div>`;
+      parentEl.appendChild(prompt);
+
+      prompt.addEventListener('click', (e) => {
+        const action = e.target.closest('[data-action]')?.dataset?.action;
+        if (!action) return;
+        prompt.remove();
+        if (action === 'deny') return;
+        if (action === 'always') {
+          this._trustedDroplets = this._trustedDroplets || new Set();
+          this._trustedDroplets.add(nudgeUid);
+          this.ws.send({ type: 'mcp_trust:grant', nudge_uid: nudgeUid });
+        }
+        // For 'once' or 'always', send the trust-gated actions to server for execution
+        this.ws.send({
+          type: 'mcp_trust:execute_once',
+          nudge_uid: nudgeUid,
+          inject_messages: rich.inject_messages || null,
+          trigger_llm_call: rich.trigger_llm_call || null,
+        });
+      });
+    },
+
+    /**
+     * Resolve vendor library scripts for iframe injection.
+     * Fetches and caches vendor lib content from local paths.
+     */
+    async _resolveVendorScripts(libKeys) {
+      if (!this._vendorLibCache) this._vendorLibCache = {};
+      const VENDOR_LIBS = {
+        plotly:  { src: '/static/chat/vendor/plotly/plotly-2.35.2.min.js' },
+        three:   { src: '/static/chat/vendor/three/three.min.js' },
+      };
+      return Promise.all(libKeys.map(async (key) => {
+        if (this._vendorLibCache[key]) return this._vendorLibCache[key];
+        const lib = VENDOR_LIBS[key];
+        if (!lib) return null;
+        try {
+          const resp = await fetch(lib.src);
+          const text = await resp.text();
+          this._vendorLibCache[key] = text;
+          return text;
+        } catch (err) {
+          console.warn('[RICH_MCP] Failed to fetch vendor lib:', key, err);
+          return null;
+        }
+      }));
+    },
+
+    /**
+     * Append an injected message bubble (from trusted droplet).
+     */
+    _appendInjectedMessage(role, content, sourceNudge) {
+      const messagesEl = document.querySelector('.cv2-messages');
+      if (!messagesEl) return;
+      const msgDiv = document.createElement('div');
+      msgDiv.className = `cv2-msg cv2-msg-${role}`;
+      const contentDiv = document.createElement('div');
+      contentDiv.className = 'cv2-msg-content';
+      contentDiv.textContent = content;
+      msgDiv.appendChild(contentDiv);
+      // Add injected badge
+      const badge = document.createElement('span');
+      badge.className = 'cv2-injected-badge';
+      badge.textContent = `injected by droplet`;
+      contentDiv.appendChild(badge);
+      messagesEl.appendChild(msgDiv);
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+    },
+
+    /**
      * Clean up all browser MCP Workers (called on disconnect).
      */
     _cleanupBrowserMcp() {
@@ -562,6 +725,20 @@ self.onmessage = async (e) => {
       start_browser_mcp(app, msg) { app._handleStartBrowserMcp(msg); },
       browser_mcp_call(app, msg) { app._handleBrowserMcpCall(msg); },
       stop_browser_mcp(app, msg) { app._handleStopBrowserMcp(msg); },
+    },
+  });
+
+  ChatFeatures.register('mcpRich', {
+    initState(app) {
+      app._trustedDroplets = new Set();
+    },
+    handleMessage: {
+      injected_message(app, msg) {
+        app._appendInjectedMessage(msg.role, msg.content, msg.source_nudge);
+      },
+      mcp_trust_list(app, msg) {
+        app._trustedDroplets = new Set(msg.nudge_uids || []);
+      },
     },
   });
 

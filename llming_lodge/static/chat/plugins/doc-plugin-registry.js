@@ -115,6 +115,10 @@ class DocPluginRegistry {
     try {
       await p.render(container, data, blockId);
 
+      // Store raw data for dev mode inspection (Ctrl+Shift+Click)
+      container._devRawData = rawData;
+      container._devLang = lang;
+
       // Notify listener with block metadata (skip non-sidebar plugins like contact cards)
       if (this._onBlockRendered && p.sidebar !== false) {
         let name = null, id = null;

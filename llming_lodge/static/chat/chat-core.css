@@ -13,6 +13,26 @@
 
 /* Chat — Static Chat Application Styles */
 
+/* ── Base resets (previously provided by NiceGUI's framework CSS) ── */
+.material-icons {
+  font-family: 'Material Icons';
+  font-weight: normal;
+  font-style: normal;
+  font-size: 20px;
+  display: inline-block;
+  line-height: 1;
+  text-transform: none;
+  letter-spacing: normal;
+  word-wrap: normal;
+  white-space: nowrap;
+  direction: ltr;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  -moz-osx-font-smoothing: grayscale;
+  font-feature-settings: 'liga';
+  vertical-align: middle;
+}
+
 /* ── Theme Variables (override via host app CSS) ───── */
 
 :root {
@@ -39,6 +59,7 @@
   --chat-border-strong: #d1d5db;
   --chat-radius: 12px;
   --chat-avatar-bg: #d1d5db;
+  --chat-scrollbar-thumb: rgba(0,0,0,0.15);
 }
 
 /* ── Dark Mode ───────────────────────────────────── */
@@ -59,6 +80,71 @@
   --chat-border-strong: rgba(255,255,255,0.18);
   --chat-accent-light: rgba(var(--chat-accent-rgb), 0.15);
   --chat-avatar-bg: #3b3b4f;
+  --chat-scrollbar-thumb: rgba(255,255,255,0.15);
+}
+
+/* ── Incognito Mode ────────────────────────────────── */
+
+#chat-app.cv2-incognito {
+  --chat-sidebar-bg: #1a1025;
+  --chat-sidebar-text: #d4c6e8;
+  --chat-sidebar-text-muted: #9a85b8;
+  --chat-sidebar-hover: rgba(128, 90, 213, 0.12);
+  --chat-sidebar-active: rgba(128, 90, 213, 0.22);
+  --chat-sidebar-border: rgba(128, 90, 213, 0.15);
+  --chat-bg: #120e1a;
+  --chat-bg-end: #0e0a14;
+  --chat-surface: #1e1630;
+  --chat-text: #e0d6f0;
+  --chat-text-muted: #9a85b8;
+  --chat-border: rgba(128, 90, 213, 0.15);
+  --chat-border-strong: rgba(128, 90, 213, 0.25);
+  --chat-accent: #9333ea;
+  --chat-accent-rgb: 147, 51, 234;
+  --chat-accent-light: rgba(147, 51, 234, 0.15);
+  --chat-accent-hover: #7e22ce;
+  --chat-avatar-bg: #3b2960;
+  --chat-scrollbar-thumb: rgba(128, 90, 213, 0.3);
+}
+#chat-app.cv2-incognito .cv2-sidebar {
+  background: linear-gradient(180deg, #1a1025 0%, #150d20 100%) !important;
+}
+#chat-app.cv2-incognito .cv2-msg-user-bubble {
+  background: linear-gradient(135deg, #7c3aed, #9333ea) !important;
+}
+#chat-app.cv2-incognito .cv2-send-btn {
+  background: linear-gradient(135deg, #7c3aed, #9333ea) !important;
+}
+#chat-app.cv2-incognito .cv2-new-chat-btn {
+  background: rgba(128, 90, 213, 0.15) !important;
+  color: #d4c6e8 !important;
+}
+#chat-app.cv2-incognito .cv2-input-wrapper {
+  background: #1e1630 !important;
+  border-color: rgba(128, 90, 213, 0.25) !important;
+}
+.cv2-incognito-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px;
+  border-radius: 8px;
+  border: none;
+  background: transparent;
+  color: var(--chat-text-muted);
+  cursor: pointer;
+  transition: all 0.2s;
+  opacity: 0.6;
+}
+.cv2-incognito-toggle:hover {
+  background: rgba(147, 51, 234, 0.12);
+  color: #9333ea;
+  opacity: 1;
+}
+.cv2-incognito-toggle.cv2-active {
+  background: rgba(147, 51, 234, 0.2);
+  color: #c084fc;
+  opacity: 1;
 }
 
 /* ── Pink / Barbie Mode ─────────────────────────────── */
@@ -943,9 +1029,15 @@
   min-width: 0;
   height: 100%;
   position: relative;
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
   background: linear-gradient(180deg, var(--chat-bg) 0%, var(--chat-bg-end, var(--chat-bg)) 100%);
 }
+
+.cv2-main::-webkit-scrollbar { width: 6px; }
+.cv2-main::-webkit-scrollbar-track { background: transparent; }
+.cv2-main::-webkit-scrollbar-thumb { background: var(--chat-scrollbar-thumb, rgba(0,0,0,0.08)); border-radius: 3px; }
 
 /* Tech blueprint background */
 .cv2-bg-anim {
@@ -970,12 +1062,12 @@
   margin: 0 auto 8px;
   pointer-events: none;
 }
-/* Light mode — corporate blue */
-.cv2-logo-stroke { stroke: #1D459F; }
-.cv2-logo-fill   { fill: #1D459F; }
-/* Dark mode — brighter blue */
-#chat-app.cv2-dark .cv2-logo-stroke { stroke: #6BA3E8; }
-#chat-app.cv2-dark .cv2-logo-fill   { fill: #6BA3E8; }
+/* Light mode — Lechler globe light-theme blue */
+.cv2-logo-stroke { stroke: #003B80; }
+.cv2-logo-fill   { fill: #003B80; }
+/* Dark mode — Lechler globe arc blue */
+#chat-app.cv2-dark .cv2-logo-stroke { stroke: #4a90d0; }
+#chat-app.cv2-dark .cv2-logo-fill   { fill: #4a90d0; }
 /* Hide on small screens */
 @media (max-width: 599px), (max-height: 499px) {
   .cv2-brand-logo { display: none; }
@@ -1000,7 +1092,7 @@
   z-index: 1;
 }
 
-.cv2-topbar {
+.cv2-main > .cv2-topbar {
   display: flex;
   align-items: flex-start;
   padding: 0 8px;
@@ -1008,7 +1100,8 @@
   flex-shrink: 0;
   height: 0;
   overflow: visible;
-  position: relative;
+  position: sticky;
+  top: 0;
   z-index: 10;
   pointer-events: none;
 }
@@ -1223,23 +1316,23 @@
 /* ── Chat Area ────────────────────────────────────── */
 
 .cv2-chat-wrapper {
-  flex: 1;
+  flex: 1 0 auto;
   display: flex;
   flex-direction: column;
-  max-width: 800px;
+  max-width: 900px;
   margin: 0 auto;
   width: 100%;
   padding: 0 20px;
-  min-height: 0;
+  min-height: 100%;
+  position: relative;
 }
 
 /* ── Messages ─────────────────────────────────────── */
 
 #cv2-messages-wrap {
-  flex: 1;
+  flex: 1 0 auto;
   display: flex;
   flex-direction: column;
-  min-height: 0;
   padding-top: 2px;  /* fixed 2px gap — always visible, never scrolls away */
 }
 
@@ -1248,15 +1341,14 @@
 }
 
 .cv2-messages {
-  flex: 1;
-  overflow-y: auto;
+  flex: 1 0 auto;
   padding: 64px 0 4px;  /* generous top padding — scrolls away when content overflows */
-  overscroll-behavior-y: contain;  /* prevent scroll chaining to parent */
-  will-change: transform;  /* compositor layer for smooth scroll */
 }
 
+/* Legacy scrollbar styles kept for any inner scroll containers */
 .cv2-messages::-webkit-scrollbar { width: 6px; }
-.cv2-messages::-webkit-scrollbar-thumb { background: rgba(0,0,0,0.08); border-radius: 3px; }
+.cv2-messages::-webkit-scrollbar-track { background: transparent; }
+.cv2-messages::-webkit-scrollbar-thumb { background: var(--chat-scrollbar-thumb, rgba(0,0,0,0.08)); border-radius: 3px; }
 
 /* ── Markdown Rendering ───────────────────────────── */
 
@@ -1344,6 +1436,39 @@
   font-size: 14px;
   color: var(--chat-text-muted);
   font-style: italic;
+}
+.cv2-tool-expandable { cursor: pointer; border-radius: 6px; padding: 4px 6px; margin: 0 -6px; }
+.cv2-tool-expandable:hover { background: rgba(128,128,128,0.08); }
+.cv2-tool-detail {
+  margin: 2px 0 8px 22px;
+  padding: 8px 10px;
+  background: var(--chat-bg);
+  border-radius: 6px;
+  border: 1px solid var(--chat-border);
+  font-style: normal;
+}
+.cv2-tool-detail-section { margin-bottom: 6px; }
+.cv2-tool-detail-section:last-child { margin-bottom: 0; }
+.cv2-tool-detail-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--chat-text-muted);
+  margin-bottom: 2px;
+  display: block;
+}
+.cv2-tool-detail-pre {
+  margin: 0;
+  padding: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--chat-text);
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  max-height: 200px;
+  overflow-y: auto;
 }
 
 /* ── Shimmer Animation ────────────────────────────── */
@@ -1492,9 +1617,7 @@
   box-shadow: 0 1px 4px rgba(0,0,0,0.2);
 }
 
-#chat-app.cv2-dark .cv2-messages::-webkit-scrollbar-thumb {
-  background: rgba(255,255,255,0.08);
-}
+/* Dark messages scrollbar now handled via --chat-scrollbar-thumb variable */
 
 /* ── Responsive ───────────────────────────────────── */
 
@@ -1538,9 +1661,9 @@
     gap: 12px;
   }
 
-  /* Input area: tighter bottom padding */
+  /* Input area: tighter top gradient on mobile */
   .cv2-input-area {
-    padding: 6px 0 10px;
+    padding-top: 20px;
   }
 
   /* Voice picker: stack vertically on mobile */
@@ -1960,4 +2083,134 @@
   flex: 1;
   border: none;
   background: #fff;
+}
+
+/* ── API Keys Dialog ─────────────────────────────────── */
+.cv2-apikeys-dialog {
+  max-width: 520px;
+  width: 90vw;
+}
+.cv2-apikeys-list {
+  max-height: 240px;
+  overflow-y: auto;
+  margin-bottom: 12px;
+}
+.cv2-apikeys-loading,
+.cv2-apikeys-empty {
+  padding: 12px;
+  text-align: center;
+  opacity: .6;
+}
+.cv2-apikeys-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--cv2-border, rgba(0,0,0,.1));
+  gap: 8px;
+}
+.cv2-apikeys-item:last-child { border-bottom: none; }
+.cv2-apikeys-item-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.cv2-apikeys-item-name {
+  font-weight: 600;
+  white-space: nowrap;
+}
+.cv2-apikeys-item-prefix {
+  font-size: .82em;
+  opacity: .65;
+  white-space: nowrap;
+}
+.cv2-apikeys-item-perms {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+.cv2-apikeys-badge {
+  font-size: .72em;
+  padding: 1px 6px;
+  border-radius: 8px;
+  background: var(--cv2-accent, #4a90d9);
+  color: #fff;
+  white-space: nowrap;
+  text-transform: capitalize;
+}
+.cv2-apikeys-delete-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  opacity: .5;
+  padding: 4px;
+  color: inherit;
+  flex-shrink: 0;
+}
+.cv2-apikeys-delete-btn:hover { opacity: 1; color: #e53935; }
+.cv2-apikeys-created-banner {
+  background: var(--cv2-bg-hover, #f0f7ff);
+  border: 1px solid var(--cv2-accent, #4a90d9);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+}
+.cv2-apikeys-created-label {
+  font-size: .85em;
+  margin-bottom: 6px;
+  font-weight: 600;
+}
+.cv2-apikeys-created-key {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.cv2-apikeys-created-key code {
+  flex: 1;
+  font-size: .85em;
+  word-break: break-all;
+  background: var(--cv2-bg-code, rgba(0,0,0,.05));
+  padding: 4px 8px;
+  border-radius: 4px;
+}
+.cv2-apikeys-copy-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 4px;
+  color: inherit;
+  opacity: .7;
+}
+.cv2-apikeys-copy-btn:hover { opacity: 1; }
+.cv2-apikeys-create-section {
+  border-top: 1px solid var(--cv2-border, rgba(0,0,0,.1));
+  padding-top: 12px;
+}
+.cv2-apikeys-create-row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.cv2-apikeys-input {
+  flex: 1;
+  padding: 6px 10px;
+  border: 1px solid var(--cv2-border, rgba(0,0,0,.2));
+  border-radius: 6px;
+  background: var(--cv2-bg-input, #fff);
+  color: inherit;
+  font-size: .9em;
+}
+.cv2-apikeys-perms {
+  display: flex;
+  gap: 14px;
+  font-size: .85em;
+  opacity: .8;
+}
+.cv2-apikeys-perms label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
 }

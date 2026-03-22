@@ -147,20 +147,37 @@ class MarkdownRenderer {
   }
 
   _protectLatex(text) {
-    // Replace $$ ... $$ and $ ... $ with placeholders
+    // Replace $$ ... $$ and $ ... $ with placeholders,
+    // but SKIP content inside fenced code blocks (``` ... ```)
+    // to avoid corrupting rich_mcp JSON and other code blocks.
     let idx = 0;
     this._latexBlocks = [];
-    // Display math $$...$$
-    text = text.replace(/\$\$([\s\S]*?)\$\$/g, (_, expr) => {
-      this._latexBlocks.push({ expr, display: true });
-      return `%%LATEX_${idx++}%%`;
-    });
-    // Inline math $...$
-    text = text.replace(/\$([^\n$]+?)\$/g, (_, expr) => {
-      this._latexBlocks.push({ expr, display: false });
-      return `%%LATEX_${idx++}%%`;
-    });
-    return text;
+
+    // Split text into fenced-code vs prose segments
+    const parts = text.split(/(```[\s\S]*?```)/g);
+    for (let p = 0; p < parts.length; p++) {
+      // Odd indices are fenced code blocks — leave untouched
+      if (p % 2 === 1) continue;
+      // Display math: $$...$$ and \[...\]
+      parts[p] = parts[p].replace(/\$\$([\s\S]*?)\$\$/g, (_, expr) => {
+        this._latexBlocks.push({ expr, display: true });
+        return `%%LATEX_${idx++}%%`;
+      });
+      parts[p] = parts[p].replace(/\\\[([\s\S]*?)\\\]/g, (_, expr) => {
+        this._latexBlocks.push({ expr, display: true });
+        return `%%LATEX_${idx++}%%`;
+      });
+      // Inline math: $...$ and \(...\)
+      parts[p] = parts[p].replace(/\$([^\n$]+?)\$/g, (_, expr) => {
+        this._latexBlocks.push({ expr, display: false });
+        return `%%LATEX_${idx++}%%`;
+      });
+      parts[p] = parts[p].replace(/\\\(([^\n]*?)\\\)/g, (_, expr) => {
+        this._latexBlocks.push({ expr, display: false });
+        return `%%LATEX_${idx++}%%`;
+      });
+    }
+    return parts.join('');
   }
 
   _renderLatex(html) {

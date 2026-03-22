@@ -6,7 +6,7 @@ import time
 from typing import TYPE_CHECKING, Optional
 
 from llming_lodge.api.writing_styles import get_style_context
-from llming_lodge.providers.llm_provider_models import ReasoningEffort
+from llming_models.providers.llm_provider_models import ReasoningEffort
 
 if TYPE_CHECKING:
     from llming_lodge.api.chat_session_api import WebSocketChatController
@@ -135,7 +135,7 @@ class AIEditHandler:
                 logger.info("[AI_EDIT] %s — model=%s in=%d out=%d cost=%.5f dur=%.0fms",
                             operation_type, model_name, actual_in, actual_out, actual_cost, duration_ms)
 
-            from llming_lodge.messages import LlmAIMessage
+            from llming_models.messages import LlmAIMessage
             return LlmAIMessage(content="".join(parts), response_metadata=last_meta)
 
         except (asyncio.CancelledError, Exception) as e:
@@ -183,8 +183,8 @@ class AIEditHandler:
             human = f"Document context (for reference only):\n{full_context[:2000]}\n\n---\nText to rewrite:\n{selected_text}"
 
             try:
-                from llming_lodge.messages import LlmSystemMessage, LlmHumanMessage
-                from llming_lodge.budget import InsufficientBudgetError
+                from llming_models.messages import LlmSystemMessage, LlmHumanMessage
+                from llming_models.budget import InsufficientBudgetError
 
                 response = await self._invoke_with_budget(
                     [LlmSystemMessage(content=system), LlmHumanMessage(content=human)],
@@ -284,7 +284,7 @@ class AIEditHandler:
             history_len = len(session.history.messages)
 
             try:
-                from llming_lodge.budget import InsufficientBudgetError
+                from llming_models.budget import InsufficientBudgetError
 
                 # Always use streaming — ainvoke doesn't handle tool loops.
                 # Collect chunks silently (no WS forwarding to frontend).
@@ -336,8 +336,12 @@ class AIEditHandler:
 
         self._pending_task = asyncio.create_task(_run())
 
-    # Model used for ghost text — must be fast (<2s), minimal cost
-    TYPEAHEAD_MODEL = "gpt-5-nano"
+    def _get_cheapest_model(self) -> str:
+        """Pick the cheapest model from the current provider for fast tasks."""
+        session = self._ctrl.session
+        models = session._provider.get_models()
+        candidates = sorted(models, key=lambda m: m.input_token_price)
+        return candidates[0].model if candidates else session.config.model
 
     async def handle_typeahead_request(self, msg: dict) -> None:
         """Process an ai_typeahead_request — runs as cancellable task."""
@@ -379,13 +383,13 @@ class AIEditHandler:
             )
 
             try:
-                from llming_lodge.messages import LlmSystemMessage, LlmHumanMessage
+                from llming_models.messages import LlmSystemMessage, LlmHumanMessage
 
                 response = await self._invoke_with_budget(
                     [LlmSystemMessage(content=system), LlmHumanMessage(content=context)],
                     temperature=0.2, max_tokens=40, timeout=5,
                     operation_type="ghost_suggestion",
-                    model_override=self.TYPEAHEAD_MODEL,
+                    model_override=self._get_cheapest_model(),
                     reasoning_effort=ReasoningEffort.NONE,
                 )
 

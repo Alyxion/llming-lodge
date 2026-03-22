@@ -13,7 +13,7 @@ class LLMUserToolConfig(BaseModel):
     prompt: str = Field("", description="Prompt for the user tool")
     prompt_path: str = Field("", description="Path to the prompt file")
     tool_type: str = Field(LLMUserToolType.TEXT_TO_TEXT, description="Type of the user tool. See UserToolType for valid values")
-    model: str = Field("gpt-5.2", description="Default model for the user tool")
+    model: str = Field("", description="Model for the user tool. Empty = use session default. Supports @category (e.g. @large, @small) or concrete model names.")
     script: dict = Field(default_factory=dict, description="Script configuration for the user tool")
 
 class LLMUserToolSetConfig(BaseModel):

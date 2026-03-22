@@ -7,34 +7,211 @@ build_ws_router() — FastAPI APIRouter with /ws/{session_id} endpoint
 
 import asyncio
 import base64
+import hashlib
 import io
 import json
 import logging
 import re
+import secrets
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
+
+from llming_com import BaseSessionEntry, BaseSessionRegistry
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
+from zoneinfo import ZoneInfo
 from uuid import uuid4
 
 from starlette.websockets import WebSocket, WebSocketDisconnect, WebSocketState
 
-from llming_lodge import ChatSession, ChatHistory, LLMManager
-from llming_lodge.budget import BudgetHandler
-from llming_lodge.budget.budget_limit import BudgetLimit
-from llming_lodge.llm_base_models import Role, ChatMessage
-from llming_lodge.tools.tool_call import ToolCallInfo, ToolCallStatus
+from llming_models import ChatSession, ChatHistory, LLMManager
+from llming_models.budget import BudgetHandler
+from llming_models.budget.budget_limit import BudgetLimit
+from llming_lodge.system_nudges import is_system_nudge_uid, get_system_nudge, search_system_nudges, _meta as _sys_nudge_meta
+from llming_models.llm_base_models import Role, ChatMessage
+from llming_models.tools.tool_call import ToolCallInfo, ToolCallStatus
 from llming_lodge.chat_controller import ChatController, llm_manager
-from llming_lodge.tools.tool_definition import MCPServerConfig, ToolUIMetadata
-from llming_lodge.tools.tool_registry import get_default_registry
+from llming_models.tools.tool_definition import MCPServerConfig, ToolUIMetadata
+from llming_models.tools.tool_registry import get_default_registry
 from pathlib import Path
 
 from llming_lodge.documents import UploadManager
-from llming_lodge.utils.image_utils import sniff_image_mime
+from llming_models.utils.image_utils import sniff_image_mime
 from llming_lodge.utils import LlmMarkdownPostProcessor
 from llming_lodge.i18n import t_chat
 
 logger = logging.getLogger(__name__)
+
+
+# ── API Keys collection helper ──────────────────────────────────────
+
+_api_keys_coll_cache = None
+_api_keys_indexes_created = False
+
+
+def _get_api_keys_coll(controller):
+    """Get the api_keys MongoDB collection using the controller's nudge_store."""
+    global _api_keys_coll_cache, _api_keys_indexes_created
+    if _api_keys_coll_cache is not None:
+        return _api_keys_coll_cache
+    ns = getattr(controller, "_nudge_store", None)
+    if not ns:
+        return None
+    from nice_droplets.utils.mongo_helpers import get_async_mongo_client
+    client = get_async_mongo_client(ns._mongo_uri)
+    db = client[ns._mongo_db]
+    _api_keys_coll_cache = db["api_keys"]
+    return _api_keys_coll_cache
+
+
+async def _ensure_api_keys_indexes(coll):
+    """Create indexes on the api_keys collection (idempotent)."""
+    global _api_keys_indexes_created
+    if _api_keys_indexes_created:
+        return
+    try:
+        await coll.create_index("key_id", unique=True)
+        await coll.create_index("user_email")
+        await coll.create_index("key_hash")
+        _api_keys_indexes_created = True
+    except Exception as e:
+        logger.warning("[API_KEYS] Index creation failed: %s", e)
+
+
+# ── Remote tasks collection helper ──────────────────────────────────
+
+_remote_tasks_coll_cache = None
+_remote_tasks_indexes_created = False
+
+
+def _get_remote_tasks_coll(controller):
+    """Get the remote_tasks MongoDB collection."""
+    global _remote_tasks_coll_cache, _remote_tasks_indexes_created
+    if _remote_tasks_coll_cache is not None:
+        return _remote_tasks_coll_cache
+    ns = getattr(controller, "_nudge_store", None)
+    if not ns:
+        return None
+    from nice_droplets.utils.mongo_helpers import get_async_mongo_client
+    client = get_async_mongo_client(ns._mongo_uri)
+    db = client[ns._mongo_db]
+    _remote_tasks_coll_cache = db["remote_tasks"]
+    return _remote_tasks_coll_cache
+
+
+async def _ensure_remote_tasks_indexes(coll):
+    """Create indexes on remote_tasks collection (idempotent)."""
+    global _remote_tasks_indexes_created
+    if _remote_tasks_indexes_created:
+        return
+    try:
+        await coll.create_index("task_id", unique=True)
+        await coll.create_index([("user_email", 1), ("status", 1)])
+        await coll.create_index("created_at", expireAfterSeconds=600)
+        _remote_tasks_indexes_created = True
+    except Exception as e:
+        logger.warning("[REMOTE_TASKS] Index creation failed: %s", e)
+
+
+# ── MCP Droplet Trust collection helper ──────────────────────────────
+
+_mcp_trust_coll_cache = None
+_mcp_trust_indexes_created = False
+
+
+def _get_trust_coll(controller):
+    """Get the mcp_droplet_trust MongoDB collection."""
+    global _mcp_trust_coll_cache
+    if _mcp_trust_coll_cache is not None:
+        return _mcp_trust_coll_cache
+    ns = getattr(controller, "_nudge_store", None)
+    if not ns:
+        return None
+    from nice_droplets.utils.mongo_helpers import get_async_mongo_client
+    client = get_async_mongo_client(ns._mongo_uri)
+    db = client[ns._mongo_db]
+    _mcp_trust_coll_cache = db["mcp_droplet_trust"]
+    return _mcp_trust_coll_cache
+
+
+async def _ensure_trust_indexes(coll):
+    """Create indexes on mcp_droplet_trust (idempotent)."""
+    global _mcp_trust_indexes_created
+    if _mcp_trust_indexes_created:
+        return
+    try:
+        await coll.create_index(
+            [("user_email", 1), ("nudge_uid", 1)], unique=True
+        )
+        _mcp_trust_indexes_created = True
+    except Exception as e:
+        logger.warning("[MCP_TRUST] Index creation failed: %s", e)
+
+
+async def _is_droplet_trusted(controller, nudge_uid: str) -> bool:
+    """Check if a droplet is trusted by the current user."""
+    coll = _get_trust_coll(controller)
+    if coll is None:
+        return False
+    await _ensure_trust_indexes(coll)
+    doc = await coll.find_one({
+        "user_email": (controller.user_mail or "").lower(),
+        "nudge_uid": nudge_uid,
+    })
+    return bool(doc and doc.get("trusted"))
+
+
+async def _get_trusted_nudge_uids(controller) -> list[str]:
+    """Return all trusted nudge UIDs for the current user."""
+    coll = _get_trust_coll(controller)
+    if coll is None:
+        return []
+    await _ensure_trust_indexes(coll)
+    docs = await coll.find(
+        {"user_email": (controller.user_mail or "").lower(), "trusted": True}
+    ).to_list(500)
+    return [d["nudge_uid"] for d in docs if d.get("nudge_uid")]
+
+
+# ── Rich MCP Render Storage ─────────────────────────────────
+
+_rich_mcp_coll_cache = None
+
+
+def _get_rich_mcp_coll(controller):
+    """Get the rich_mcp_renders MongoDB collection."""
+    global _rich_mcp_coll_cache
+    if _rich_mcp_coll_cache is not None:
+        return _rich_mcp_coll_cache
+    ns = getattr(controller, "_nudge_store", None)
+    if not ns:
+        return None
+    from nice_droplets.utils.mongo_helpers import get_async_mongo_client
+    client = get_async_mongo_client(ns._mongo_uri)
+    db = client[ns._mongo_db]
+    _rich_mcp_coll_cache = db["rich_mcp_renders"]
+    return _rich_mcp_coll_cache
+
+
+async def _store_rich_mcp_render(controller, render_spec: dict, tool_name: str) -> str | None:
+    """Store a rich MCP render spec in MongoDB. Returns UUID string or None on failure."""
+    coll = _get_rich_mcp_coll(controller)
+    if coll is None:
+        return None
+    uid = str(uuid4())
+    try:
+        await coll.insert_one({
+            "_id": uid,
+            "session_id": controller.session_id,
+            "tool_name": tool_name,
+            "render": render_spec,
+            "version": render_spec.get("version", "1.0") if isinstance(render_spec, dict) else "1.0",
+            "created_at": datetime.now(timezone.utc),
+        })
+        return uid
+    except Exception as e:
+        logger.warning("[RICH_MCP] Failed to store render spec: %s", e)
+        return None
 
 
 # ── PDF Viewer MCP — auto-register/unregister on PDF upload/remove ──
@@ -53,8 +230,8 @@ async def _register_mcp_tools(controller: "WebSocketChatController", mcp_config:
 
     Does NOT re-discover all MCP servers — only adds the new one.
     """
-    from llming_lodge.tools.mcp import create_connection
-    from llming_lodge.tools.tool_registry import get_default_registry
+    from llming_models.tools.mcp import create_connection
+    from llming_models.tools.tool_registry import get_default_registry
 
     registry = get_default_registry()
     connection = create_connection(mcp_config)
@@ -67,7 +244,7 @@ async def _register_mcp_tools(controller: "WebSocketChatController", mcp_config:
 
     for tool in tools:
         if category:
-            from llming_lodge.tools.tool_definition import ToolUIMetadata
+            from llming_models.tools.tool_definition import ToolUIMetadata
             if tool.ui:
                 tool.ui.category = category
             else:
@@ -95,6 +272,8 @@ async def _register_mcp_tools(controller: "WebSocketChatController", mcp_config:
         "collapse_tools": getattr(mcp_config, 'collapse_tools', False),
         "flyout": getattr(mcp_config, 'flyout', False),
         "tool_names": group_tool_names,
+        "avatar": getattr(mcp_config, 'avatar', None),
+        "auto_activate_keywords": getattr(mcp_config, 'auto_activate_keywords', None),
     }
     controller.available_tools = controller._get_available_tools_for_provider(controller.provider)
 
@@ -113,7 +292,7 @@ async def _register_mcp_tools(controller: "WebSocketChatController", mcp_config:
 
 async def _unregister_mcp_tools(controller: "WebSocketChatController", label: str) -> None:
     """Unregister tools from a named MCP server group."""
-    from llming_lodge.tools.tool_registry import get_default_registry
+    from llming_models.tools.tool_registry import get_default_registry
 
     registry = get_default_registry()
     group = controller.session._mcp_server_groups.pop(label, None)
@@ -341,8 +520,8 @@ async def _activate_browser_mcp(ctx: dict, uid: str) -> str:
     and the direct nudge-chat flow (auto-activation on new_chat).
     """
     from llming_lodge.nudge_store import get_file_cache
-    from llming_lodge.tools.mcp.browser_connection import MCPBrowserConnection
-    from llming_lodge.tools.tool_definition import ToolDefinition, ToolSource, ToolUIMetadata
+    from llming_models.tools.mcp.browser_connection import MCPBrowserConnection
+    from llming_models.tools.tool_definition import ToolDefinition, ToolSource, ToolUIMetadata
 
     store = ctx["store"]
     controller = ctx["controller"]
@@ -407,13 +586,27 @@ async def _activate_browser_mcp(ctx: dict, uid: str) -> str:
     if not files_data:
         return "MCP nudge has no JavaScript files."
 
+    # Sort files so dependencies come before dependents.
+    # Files with no local imports are loaded first.
+    import re as _re
+    _local_import_re = _re.compile(r"""import\s+\{[^}]+\}\s+from\s+['"]\./?([^'"]+)['"]""")
+
+    def _dep_sort_key(name_source):
+        name, source = name_source
+        imports = _local_import_re.findall(source)
+        # Count how many local modules this file imports
+        return len(imports)
+
+    sorted_items = sorted(files_data.items(), key=_dep_sort_key)
+    files_data = dict(sorted_items)
+
     entry_point = nudge.get("mcp_entry_point", "index.js")
 
     # Send start message to browser and await tool list
     request_id = str(__import__("uuid").uuid4())
     loop = ctx["loop"]
     future = loop.create_future()
-    ctx["pending_requests"][request_id] = future
+    ctx["pending_requests"][request_id] = {"future": future, "nudge_uid": uid}
 
     await controller._send({
         "type": "start_browser_mcp",
@@ -496,6 +689,116 @@ async def _activate_browser_mcp(ctx: dict, uid: str) -> str:
     return f"Activated MCP server '{nudge_name}' with {len(tools)} tools: {', '.join(tool_names)}"
 
 
+async def _activate_server_mcp(controller: "WebSocketChatController", nudge: dict) -> str:
+    """Activate a server-side (in-process) MCP server for a system droplet.
+
+    The nudge's capabilities.server_mcp specifies the Python class path, e.g.
+    ``llming_lodge.tools.math_mcp.MathMCP``.  The class must subclass
+    ``InProcessMCPServer``.
+    """
+    import importlib
+    from llming_models.tools.mcp.config import MCPServerConfig
+
+    caps = nudge.get("capabilities") or {}
+    class_path = caps.get("server_mcp", "")
+    if not class_path:
+        return "No server_mcp capability configured."
+
+    # Import and instantiate the server class
+    module_path, _, class_name = class_path.rpartition(".")
+    try:
+        mod = importlib.import_module(module_path)
+        cls = getattr(mod, class_name)
+    except Exception:
+        # Fallback: tools moved from llming_lodge → llming_models
+        fallback = module_path.replace("llming_lodge.", "llming_models.", 1)
+        try:
+            mod = importlib.import_module(fallback)
+            cls = getattr(mod, class_name)
+            logger.info("[SERVER_MCP] Resolved %s via fallback %s", class_path, fallback)
+        except Exception as exc:
+            logger.error("[SERVER_MCP] Failed to import %s (also tried %s): %s", class_path, fallback, exc)
+            return f"Server MCP import failed: {exc}"
+
+    # Try to pass document_store if the server supports it
+    doc_store = None
+    entry = SessionRegistry.get().get_session(controller.session_id)
+    if entry and entry.doc_manager:
+        doc_store = entry.doc_manager.store
+
+    try:
+        if doc_store:
+            try:
+                server_instance = cls(document_store=doc_store)
+            except TypeError:
+                server_instance = cls()
+        else:
+            server_instance = cls()
+    except Exception as exc:
+        logger.error("[SERVER_MCP] Failed to instantiate %s: %s", class_path, exc)
+        return f"Server MCP instantiation failed: {exc}"
+
+    nudge_name = nudge.get("name", nudge.get("uid", ""))
+    mcp_config = MCPServerConfig(
+        label=nudge_name,
+        description=nudge.get("description", ""),
+        server_instance=server_instance,
+        enabled_by_default=True,
+        collapse_tools=True,
+        avatar=nudge.get("avatar"),
+    )
+
+    await _register_mcp_tools(controller, mcp_config)
+
+    # Enforce Opus for system droplets — complex tool calling needs the best model.
+    # Save user's current preference so it's restored on new chat.
+    enforced_model = caps.get("enforced_model", "claude-opus-4-6")
+    try:
+        # Save user preference before overriding
+        controller._saved_model_pref = "@auto" if controller._auto_select else controller.model
+        await controller.switch_model(enforced_model, _force=True)
+        # Lock the model — prevent user from changing it
+        controller._model_locked = True
+        controller._model_locked_reason = nudge.get("name", "System Droplet")
+        # Notify frontend to lock the model selector
+        await controller._send({
+            "type": "model_locked",
+            "model": enforced_model,
+            "reason": controller._model_locked_reason,
+        })
+        logger.info("[SERVER_MCP] Enforced model %s for droplet '%s'",
+                    enforced_model, nudge.get("name", ""))
+    except Exception as ex:
+        logger.warning("[SERVER_MCP] Could not enforce model %s: %s", enforced_model, ex)
+
+    # Also inject a tool hint into the context preamble
+    tools = await server_instance.list_tools()
+    tool_lines = []
+    for t in tools:
+        desc = t.get("description", "")
+        tool_lines.append(f"- **{t['name']}**: {desc}" if desc else f"- **{t['name']}**")
+    hint_block = (
+        f"\n\n## MCP Tools — {nudge_name}\n"
+        "CRITICAL: You have the following specialised tools available.  "
+        "You MUST call the appropriate tool(s) BEFORE answering.  "
+        "Never guess or answer from your own knowledge when a tool can provide the answer.\n\n"
+        + "\n".join(tool_lines)
+    )
+    base_preamble = controller.context_preamble or ""
+    controller.context_preamble = base_preamble + hint_block
+    if controller.session:
+        controller.session._context_preamble = controller.context_preamble
+
+    if controller._ws:
+        await controller._send({
+            "type": "tools_updated",
+            "tools": controller.get_all_known_tools(),
+        })
+
+    logger.info("[SERVER_MCP] Activated '%s' with %d tools", nudge_name, len(tools))
+    return f"Activated server MCP '{nudge_name}' with {len(tools)} tools"
+
+
 def _activate_mcp_nudge_callback(uid: str, _session_id: str = "") -> str:
     """Activate a browser-hosted MCP nudge: spawn Worker, register tools.
 
@@ -550,38 +853,28 @@ get_default_registry().register_builtin(
 
 
 @dataclass
-class SessionEntry:
-    """A registered chat session with its controller and metadata."""
-    controller: "WebSocketChatController"
-    user_id: str
-    user_name: str = ""
-    user_avatar: str = ""
-    websocket: Optional[WebSocket] = None
-    created_at: float = field(default_factory=time.monotonic)
-    last_activity: float = field(default_factory=time.monotonic)
+class SessionEntry(BaseSessionEntry):
+    """A registered chat session with its controller and metadata.
+
+    Extends llming-com's BaseSessionEntry with chat-specific fields.
+    """
+    app_type: str = "lodge"
     upload_manager: Optional[UploadManager] = None
     mcp_servers: Optional[List[MCPServerConfig]] = None
     doc_manager: Optional[Any] = None
-    _cleanup_done: bool = False
 
 
-class SessionRegistry:
-    """Maps session_id → SessionEntry. Thread-safe via asyncio."""
+class SessionRegistry(BaseSessionRegistry["SessionEntry"]):
+    """Chat session registry — extends llming-com's BaseSessionRegistry.
 
-    _instance: Optional["SessionRegistry"] = None
-    # Global template registry — survives session cleanup so exports work from restored chats
+    Adds a global presentation template registry that survives session
+    cleanup (so PPTX export works from restored chats).
+    """
+
+    # Global template registry — class-level, session-independent
     _presentation_templates: Dict[str, Any] = {}
 
-    def __init__(self):
-        self._sessions: Dict[str, SessionEntry] = {}
-
-    @classmethod
-    def get(cls) -> "SessionRegistry":
-        if cls._instance is None:
-            cls._instance = cls()
-        return cls._instance
-
-    def register(
+    def register_session(
         self,
         session_id: str,
         controller: "WebSocketChatController",
@@ -590,6 +883,7 @@ class SessionRegistry:
         user_avatar: str = "",
         mcp_servers: Optional[List[MCPServerConfig]] = None,
     ) -> SessionEntry:
+        """Register a chat session (convenience method with UploadManager creation)."""
         entry = SessionEntry(
             controller=controller,
             user_id=user_id,
@@ -598,40 +892,12 @@ class SessionRegistry:
             upload_manager=UploadManager.create(session_id, user_id),
             mcp_servers=mcp_servers,
         )
-        self._sessions[session_id] = entry
-        logger.info(f"[REGISTRY] Registered session {session_id} for user {user_id}")
-        return entry
+        return self.register(session_id, entry)
 
-    def get_session(self, session_id: str) -> Optional[SessionEntry]:
-        entry = self._sessions.get(session_id)
-        if entry:
-            entry.last_activity = time.monotonic()
-        return entry
-
-    def remove(self, session_id: str) -> Optional[SessionEntry]:
-        entry = self._sessions.pop(session_id, None)
-        if entry:
-            logger.info(f"[REGISTRY] Removed session {session_id}")
-        return entry
-
-    def cleanup_expired(self, ttl: float = 300.0) -> int:
-        """Remove sessions idle for more than ttl seconds. Returns count removed."""
-        now = time.monotonic()
-        expired = [
-            sid for sid, entry in self._sessions.items()
-            if now - entry.last_activity > ttl
-        ]
-        for sid in expired:
-            entry = self._sessions.pop(sid, None)
-            if entry and entry.upload_manager:
-                entry.upload_manager.cleanup()
-        if expired:
-            logger.info(f"[REGISTRY] Cleaned up {len(expired)} expired sessions")
-        return len(expired)
-
-    @property
-    def active_count(self) -> int:
-        return len(self._sessions)
+    def on_session_expired(self, session_id: str, entry: SessionEntry) -> None:
+        """Clean up upload manager when a session expires."""
+        if entry.upload_manager:
+            entry.upload_manager.cleanup()
 
     # ── Global presentation template registry ──────────────────
 
@@ -712,7 +978,7 @@ class WebSocketChatController(ChatController):
         self._on_new_chat = on_new_chat
         self._project_id: Optional[str] = None
         self._nudge_id: Optional[str] = None
-        self._translation_overrides: dict[str, str] = {}
+        self._translation_overrides: dict[str, Any] = {}
         self._speech_response: bool = False
         self._speech_service: Optional[Any] = None
         self._saved_max_output_tokens: Optional[int] = None
@@ -727,6 +993,19 @@ class WebSocketChatController(ChatController):
         self._tts_sending: bool = False
         self._tts_pending: list[str] = []
         self._tts_flush_timer: Optional[asyncio.TimerHandle] = None
+        self._client_timezone: str = "UTC"
+        self._pending_rich_mcp_blocks: list[dict] = []  # inline data for rich_mcp fenced blocks
+        self._pending_doc_blocks: list[tuple[str, dict]] = []  # (type, data) for doc-store documents
+        # Maps message object id() -> list of (type, data) tuples for IndexedDB persistence
+        self._message_doc_blocks: dict[int, list[tuple[str, dict]]] = {}
+        # Rich MCP blocks per message — for serialization to IndexedDB only (NOT for LLM history).
+        # Maps message object id() -> list of block dicts.  Kept separate from history so the LLM
+        # never sees plotly/render JSON on future turns.
+        self._message_rich_mcp: dict[int, list[dict]] = {}
+        # Maps message object id() -> list of tool call dicts (for IndexedDB persistence)
+        self._message_tool_calls: dict[int, list[dict]] = {}
+        # Maps message object id() -> avatar override dict (for MCP custom avatars)
+        self._message_avatar_overrides: dict[int, dict] = {}
 
     def get_all_known_tools(self) -> List[dict]:
         """Override to translate built-in tool names and categories.
@@ -769,20 +1048,43 @@ class WebSocketChatController(ChatController):
         """Send a JSON message over the WebSocket."""
         if self._ws and self._ws.client_state == WebSocketState.CONNECTED:
             try:
-                await self._ws.send_json(msg)
+                payload = json.dumps(msg, ensure_ascii=False)
+                payload_len = len(payload)
+                msg_type = msg.get("type", "?")
+                if payload_len > 50_000:
+                    logger.warning("[WS_SIZE] type=%s size=%d bytes (%.1f KB)", msg_type, payload_len, payload_len / 1024)
+                else:
+                    logger.debug("[WS_SIZE] type=%s size=%d bytes", msg_type, payload_len)
+                await self._ws.send_text(payload)
             except Exception as e:
-                logger.debug(f"[WS] Send failed: {e}")
+                logger.warning("[WS] Send failed (type=%s): %s", msg.get("type", "?"), e)
 
     # ── Abstract hook implementations ─────────────────────────
 
+    def _get_mcp_avatar_for_tools(self, tool_names: set[str]) -> tuple[str, str] | None:
+        """Find the MCP avatar for the given tool names. Returns (icon, label) or None."""
+        if not hasattr(self.session, '_mcp_server_groups'):
+            return None
+        for group in self.session._mcp_server_groups.values():
+            avatar = group.get("avatar")
+            if not avatar:
+                continue
+            if tool_names.intersection(group.get("tool_names", [])):
+                return avatar, group.get("label", "")
+        return None
+
     def _on_response_started(self) -> None:
         model_info = llm_manager.get_model_info(self.model)
-        asyncio.create_task(self._send({
+        msg = {
             "type": "response_started",
             "model": self.model,
             "model_icon": model_info.model_icon if model_info else "",
             "model_label": model_info.label if model_info else self.model,
-        }))
+        }
+        if self._auto_select:
+            msg["auto_icon"] = "models/auto-select.svg"
+            msg["model_label"] = f"Auto ({msg['model_label']})"
+        asyncio.create_task(self._send(msg))
 
     _SENTENCE_BREAK = re.compile(r'[.!?]\s')
     _LONG_BREAK = re.compile(r'[,;:–]\s')
@@ -801,6 +1103,17 @@ class WebSocketChatController(ChatController):
             "type": "text_chunk",
             "content": content,
         }))
+        # Push chunk to remote task document if active
+        remote_task_id = getattr(self, "_remote_task_id", None)
+        if remote_task_id:
+            coll = _get_remote_tasks_coll(self)
+            if coll is not None:
+                asyncio.create_task(
+                    coll.update_one(
+                        {"task_id": remote_task_id},
+                        {"$push": {"chunks": content}},
+                    )
+                )
         if self._speech_response:
             self._tts_text_buffer += content
             # Strip completed code blocks (```...```) from TTS buffer
@@ -813,15 +1126,156 @@ class WebSocketChatController(ChatController):
             self._schedule_tts_flush_timer()
 
     def _on_tool_event(self, tool_call: ToolCallInfo) -> None:
-        asyncio.create_task(self._send({
+        result = tool_call.result if tool_call.status == ToolCallStatus.COMPLETED else None
+
+        # Detect rich MCP envelope in in-process tool results
+        if result is not None:
+            result_size = len(str(result))
+            logger.info("[TOOL_RESULT] tool=%s status=%s result_size=%d bytes (%.1f KB)",
+                        tool_call.name, tool_call.status, result_size, result_size / 1024)
+            try:
+                parsed = result if isinstance(result, dict) else json.loads(result)
+                if isinstance(parsed, dict) and "__rich_mcp__" in parsed:
+                    rich_mcp = parsed["__rich_mcp__"]
+                    # Build LLM summary from structured data
+                    llm_summary = rich_mcp.get("llm_summary")
+                    if not llm_summary:
+                        parts = []
+                        if rich_mcp.get("formatted"):
+                            parts.append(f"Product: {rich_mcp['formatted']}")
+                        if rich_mcp.get("ordering"):
+                            parts.append(f"Ordering: {rich_mcp['ordering']}")
+                        for k, v in (rich_mcp.get("info") or {}).items():
+                            if v and v != "N/A":
+                                parts.append(f"{k}: {v}")
+                        llm_summary = "\n".join(parts) if parts else f"[{rich_mcp.get('title', 'Visualization')}]"
+                    # Replace tool result with summary so LLM doesn't see the full envelope
+                    result = llm_summary
+                    tool_call = ToolCallInfo(
+                        name=tool_call.name,
+                        call_id=tool_call.call_id,
+                        status=tool_call.status,
+                        arguments=tool_call.arguments,
+                        result=llm_summary,
+                        error=tool_call.error,
+                        display_name=tool_call.display_name,
+                        is_image_generation=tool_call.is_image_generation,
+                    )
+                    # Queue inline data for fenced code block injection (no MongoDB)
+                    block_data = dict(rich_mcp)
+                    block_data.pop("llm_summary", None)
+                    # Keep render data for types that need client-side rendering
+                    render_data = block_data.get("render")
+                    if render_data and render_data.get("type") not in ("html_sandbox", "math_result"):
+                        block_data.pop("render", None)
+                    block_data["id"] = str(uuid4())
+                    self._pending_rich_mcp_blocks.append(block_data)
+            except (json.JSONDecodeError, TypeError, AttributeError):
+                pass
+
+        # Detect __inline_doc__ in tool results (e.g. math_plot_2d).
+        # The tool already created the doc in the store and included
+        # document_id in its result (visible to the LLM).  We just need to
+        # queue a fenced code block for inline rendering + persistence,
+        # and strip the bulky data from the WS event.
+        #
+        # IMPORTANT: If the tool also called doc_store.create(), a "doc_created"
+        # WS event was already sent which renders the block via _injectToolDocBlock.
+        # In that case we must NOT queue a fenced code block (it would duplicate).
+        # We detect this by checking for "document_id" in the result — if present,
+        # the doc store already created and notified the client.
+        if result is not None:
+            try:
+                parsed_res = result if isinstance(result, dict) else json.loads(result)
+                _SAFE_DOC_TYPES = {"plotly", "table", "text_doc", "presentation", "html", "html_sandbox", "latex", "email_draft"}
+                if isinstance(parsed_res, dict) and "__inline_doc__" in parsed_res:
+                    inline = parsed_res.pop("__inline_doc__")
+                    doc_type = inline.get("type", "plotly")
+                    if doc_type not in _SAFE_DOC_TYPES:
+                        logger.warning("[TOOL_RESULT] Rejected unknown doc type: %s", doc_type)
+                        raise KeyError("unknown doc type")  # caught by except below, skips injection
+                    doc_name = inline.get("name", "Document")
+                    doc_data = inline.get("data", {})
+                    doc_id = inline.get("id") or parsed_res.get("document_id") or uuid4().hex[:12]
+
+                    # Skip fenced block injection if doc_store already notified the
+                    # client via doc_created (prevents duplicate rendering).
+                    already_notified = bool(parsed_res.get("document_id"))
+
+                    if not already_notified:
+                        # Queue fenced code block for inline rendering
+                        block = dict(doc_data)
+                        block["id"] = doc_id
+                        block["name"] = doc_name
+                        self._pending_doc_blocks.append((doc_type, block))
+                        logger.info("[TOOL_RESULT] Queued inline doc type=%s id=%s for injection",
+                                    doc_type, doc_id)
+                    else:
+                        logger.info("[TOOL_RESULT] Skipping fenced block for type=%s id=%s (doc_store already notified client)",
+                                    doc_type, doc_id)
+
+                    # Strip bulky __inline_doc__ from WS event but keep
+                    # the original tool result for conversation history
+                    result = json.dumps(parsed_res)
+                    tool_call = ToolCallInfo(
+                        name=tool_call.name,
+                        call_id=tool_call.call_id,
+                        status=tool_call.status,
+                        arguments=tool_call.arguments,
+                        result=result,
+                        error=tool_call.error,
+                        display_name=tool_call.display_name,
+                        is_image_generation=tool_call.is_image_generation,
+                    )
+            except (json.JSONDecodeError, TypeError, AttributeError, KeyError):
+                pass
+
+        # Auto-enable per-type editing tools when a document is created.
+        # This covers both create_document tool and __inline_doc__ tool results.
+        if result is not None and tool_call.status == ToolCallStatus.COMPLETED:
+            try:
+                _parsed = result if isinstance(result, dict) else json.loads(result)
+                _doc_type = None
+                if isinstance(_parsed, dict):
+                    # create_document returns {"status": "created", "type": "text_doc", ...}
+                    if _parsed.get("status") == "created" and _parsed.get("type"):
+                        _doc_type = _parsed["type"]
+                    # __inline_doc__ results have document_id + we know the type
+                    elif _parsed.get("document_id") and _parsed.get("status") == "chart_created":
+                        _doc_type = "plotly"
+                if _doc_type:
+                    from llming_docs.manager import _MCP_SERVERS, _TYPE_ALIASES
+                    _doc_type = _TYPE_ALIASES.get(_doc_type, _doc_type)
+                    spec = _MCP_SERVERS.get(_doc_type)
+                    if spec:
+                        group_label = spec["label"]
+                        server_groups = getattr(self.session, '_mcp_server_groups', {})
+                        group = server_groups.get(group_label)
+                        if group:
+                            all_group_tools = group.get("tool_names", [])
+                            if not any(tn in self.enabled_tools for tn in all_group_tools):
+                                self.toggle_tool(group_label, True)
+                                asyncio.create_task(self._send({
+                                    "type": "tools_updated",
+                                    "tools": self.get_all_known_tools(),
+                                }))
+                                logger.info("[AUTO_ENABLE] Enabled %s tools for doc type %s",
+                                            group_label, _doc_type)
+            except (json.JSONDecodeError, TypeError, AttributeError, KeyError):
+                pass
+
+        tool_event = {
             "type": "tool_event",
             "name": tool_call.name,
             "call_id": tool_call.call_id,
             "display_name": tool_call.display_name,
             "status": tool_call.status.value if hasattr(tool_call.status, "value") else str(tool_call.status),
             "is_image_generation": tool_call.is_image_generation,
-            "result": tool_call.result if tool_call.status == ToolCallStatus.COMPLETED else None,
-        }))
+            "result": result,
+        }
+        if tool_call.arguments:
+            tool_event["arguments"] = tool_call.arguments
+        asyncio.create_task(self._send(tool_event))
 
     def _on_image_received(self, image_data: str) -> None:
         # Store for response_completed payload
@@ -832,6 +1286,51 @@ class WebSocketChatController(ChatController):
         }))
 
     def _on_response_completed(self, full_text: str) -> None:
+        logger.info("[RESP_DONE] full_text=%d chars, pending_rich_mcp=%d blocks",
+                     len(full_text), len(self._pending_rich_mcp_blocks))
+        # Append rich MCP fenced code blocks to the WS payload for client rendering,
+        # but do NOT inject them into the server-side history — the LLM should never
+        # see plotly/render JSON on future conversation turns.
+        if self._pending_rich_mcp_blocks:
+            blocks = list(self._pending_rich_mcp_blocks)
+            for i, entry in enumerate(blocks):
+                block_json = json.dumps(entry, ensure_ascii=False)
+                logger.info("[RESP_DONE] rich_mcp block %d: %d bytes (%.1f KB)",
+                            i, len(block_json), len(block_json) / 1024)
+                full_text += f"\n\n```rich_mcp\n{block_json}\n```"
+            self._pending_rich_mcp_blocks.clear()
+            logger.info("[RESP_DONE] full_text after rich_mcp injection: %d chars (%.1f KB)",
+                        len(full_text), len(full_text) / 1024)
+            # Track blocks for conversation serialization (IndexedDB persistence)
+            try:
+                if self.session.history.messages:
+                    last_msg = self.session.history.messages[-1]
+                    if last_msg.role == Role.ASSISTANT:
+                        self._message_rich_mcp[id(last_msg)] = blocks
+            except Exception as e:
+                logger.warning("[RICH_MCP] Failed to track blocks for serialization: %s", e)
+
+        # Append document-store blocks (e.g. plotly charts from math MCP)
+        # as fenced code blocks so they survive conversation reload.
+        if self._pending_doc_blocks:
+            doc_blocks = list(self._pending_doc_blocks)
+            for doc_type, block_data in doc_blocks:
+                block_json = json.dumps(block_data, ensure_ascii=False)
+                logger.info("[RESP_DONE] doc block type=%s: %d bytes (%.1f KB)",
+                            doc_type, len(block_json), len(block_json) / 1024)
+                full_text += f"\n\n```{doc_type}\n{block_json}\n```"
+            self._pending_doc_blocks.clear()
+            logger.info("[RESP_DONE] full_text after doc injection: %d chars (%.1f KB)",
+                        len(full_text), len(full_text) / 1024)
+            # Track for IndexedDB serialization (like rich_mcp blocks)
+            try:
+                if self.session.history.messages:
+                    last_msg = self.session.history.messages[-1]
+                    if last_msg.role == Role.ASSISTANT:
+                        self._message_doc_blocks[id(last_msg)] = doc_blocks
+            except Exception as e:
+                logger.warning("[DOC_BLOCKS] Failed to track for serialization: %s", e)
+
         # Process generated image
         generated_image = None
         if self._generated_image_base64:
@@ -849,20 +1348,100 @@ class WebSocketChatController(ChatController):
 
         tool_calls_data = []
         for tc in self._tool_calls:
-            tool_calls_data.append({
+            tc_data = {
                 "name": tc.name,
                 "call_id": tc.call_id,
                 "display_name": tc.display_name,
                 "status": tc.status.value if hasattr(tc.status, "value") else str(tc.status),
                 "is_image_generation": tc.is_image_generation,
-            })
+            }
+            # Include arguments and result for persistence & UI display
+            if tc.arguments:
+                tc_data["arguments"] = tc.arguments
+            if tc.result is not None:
+                # For rich_mcp results, store only the LLM summary (the full
+                # envelope is already persisted as a fenced code block)
+                result_str = tc.result
 
-        asyncio.create_task(self._send({
+                # Extract __FLUX_SOURCES__ before truncation (flux source attribution)
+                if isinstance(result_str, str) and "\n\n__FLUX_SOURCES__\n" in result_str:
+                    parts = result_str.split("\n\n__FLUX_SOURCES__\n", 1)
+                    result_str = parts[0]
+                    try:
+                        sources = json.loads(parts[1])
+                        if isinstance(sources, list):
+                            # Limit table rows to 50 for storage
+                            for src in sources:
+                                if isinstance(src, dict) and src.get("rows") and len(src["rows"]) > 50:
+                                    src["rows"] = src["rows"][:50]
+                            tc_data["sources"] = sources
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+
+                try:
+                    parsed = result_str if isinstance(result_str, dict) else json.loads(result_str) if isinstance(result_str, str) else None
+                    if isinstance(parsed, dict) and "__rich_mcp__" in parsed:
+                        result_str = parsed["__rich_mcp__"].get("llm_summary", str(result_str))
+                except (json.JSONDecodeError, TypeError, AttributeError):
+                    pass
+                # Truncate very large results for storage
+                if isinstance(result_str, str) and len(result_str) > 4000:
+                    result_str = result_str[:4000] + "…"
+                tc_data["result"] = result_str
+            if tc.error:
+                tc_data["error"] = tc.error
+            tool_calls_data.append(tc_data)
+
+        # Track tool calls for this assistant message (for IndexedDB serialization)
+        if tool_calls_data:
+            try:
+                if self.session.history.messages:
+                    last_msg = self.session.history.messages[-1]
+                    if last_msg.role == Role.ASSISTANT:
+                        self._message_tool_calls[id(last_msg)] = tool_calls_data
+            except Exception as e:
+                logger.warning("[TOOL_CALLS] Failed to track for serialization: %s", e)
+
+        # Check if tools belong to an MCP with a custom avatar
+        used_tools = {tc.name for tc in self._tool_calls}
+        mcp_avatar = self._get_mcp_avatar_for_tools(used_tools) if used_tools else None
+        avatar_override = {"icon": mcp_avatar[0], "label": mcp_avatar[1]} if mcp_avatar else None
+
+        # Track avatar override for serialization
+        if avatar_override:
+            try:
+                if self.session.history.messages:
+                    last_msg = self.session.history.messages[-1]
+                    if last_msg.role == Role.ASSISTANT:
+                        self._message_avatar_overrides[id(last_msg)] = avatar_override
+            except Exception:
+                pass
+
+        msg = {
             "type": "response_completed",
             "full_text": full_text,
             "generated_image": generated_image,
             "tool_calls": tool_calls_data,
-        }))
+        }
+        if avatar_override:
+            msg["avatar_override"] = avatar_override
+        asyncio.create_task(self._send(msg))
+
+        # Mark remote task as completed
+        remote_task_id = getattr(self, "_remote_task_id", None)
+        if remote_task_id:
+            coll = _get_remote_tasks_coll(self)
+            if coll is not None:
+                asyncio.create_task(
+                    coll.update_one(
+                        {"task_id": remote_task_id},
+                        {"$set": {
+                            "status": "completed",
+                            "response": {"text": full_text, "model": self.model},
+                        }},
+                    )
+                )
+            self._remote_task_id = None
 
         # Sentence-level TTS streaming: flush remaining buffer and send done
         if self._speech_response:
@@ -877,9 +1456,12 @@ class WebSocketChatController(ChatController):
         try:
             data = self._serialize_conversation()
             if data:
+                save_json = json.dumps({"type": "save_conversation", "data": data}, ensure_ascii=False)
+                logger.info("[SAVE] save_conversation payload: %d bytes (%.1f KB), messages=%d",
+                            len(save_json), len(save_json) / 1024, len(data.get("messages", [])))
                 await self._send({"type": "save_conversation", "data": data})
         except Exception as e:
-            logger.debug(f"[SAVE] Conversation save failed: {e}")
+            logger.warning("[SAVE] Conversation save failed: %s", e)
 
         try:
             await self._send_context_info()
@@ -1030,7 +1612,7 @@ class WebSocketChatController(ChatController):
             if not text:
                 return
             service = self._get_speech_service()
-            logger.info(f"[TTS] Synthesizing segment {segment}: {text[:60]}...")
+            logger.info(f"[TTS] Synthesizing segment {segment} ({len(text)} chars)")
             mp3_bytes = await service.synthesize_fast(text, locale=self._locale, voice=self._tts_voice)
             audio_b64 = base64.b64encode(mp3_bytes).decode("ascii")
             await self._send({
@@ -1108,16 +1690,30 @@ class WebSocketChatController(ChatController):
         }))
 
     def _on_model_switched(self, old_model: str, new_model: str) -> None:
-        old_info = llm_manager.get_model_info(old_model)
-        new_info = llm_manager.get_model_info(new_model)
+        # Guard @auto virtual model — not in the LLM registry
+        old_info = None if old_model == "@auto" else llm_manager.get_model_info(old_model)
+        new_info = None if new_model == "@auto" else llm_manager.get_model_info(new_model)
+
+        if old_model == "@auto":
+            old_label, old_icon = "Auto", "models/auto-select.svg"
+        else:
+            old_label = old_info.label if old_info else old_model
+            old_icon = old_info.model_icon if old_info else ""
+
+        if new_model == "@auto":
+            new_label, new_icon = "Auto", "models/auto-select.svg"
+        else:
+            new_label = new_info.label if new_info else new_model
+            new_icon = new_info.model_icon if new_info else ""
+
         asyncio.create_task(self._send({
             "type": "model_switched",
             "old_model": old_model,
             "new_model": new_model,
-            "old_label": old_info.label if old_info else old_model,
-            "new_label": new_info.label if new_info else new_model,
-            "old_icon": old_info.model_icon if old_info else "",
-            "new_icon": new_info.model_icon if new_info else "",
+            "old_label": old_label,
+            "new_label": new_label,
+            "old_icon": old_icon,
+            "new_icon": new_icon,
             "available_tools": self.get_all_known_tools(),
         }))
 
@@ -1384,6 +1980,40 @@ class WebSocketChatController(ChatController):
 
     # ── Conversation serialization (mirrors ChatSessionHandler) ───
 
+    def _serialize_messages(self, messages) -> list[dict]:
+        """Serialize messages for IndexedDB storage.
+
+        Re-injects rich_mcp blocks into assistant message content so that saved
+        conversations render plots on reload, WITHOUT polluting the live
+        server-side history that feeds the LLM.
+
+        Also attaches tool_calls data to assistant messages so the UI can
+        display tool usage details on conversation restore.
+        """
+        result = []
+        for m in messages:
+            data = m.model_dump(mode="json")
+            if m.role == Role.ASSISTANT:
+                blocks = self._message_rich_mcp.get(id(m))
+                if blocks:
+                    for entry in blocks:
+                        block_json = json.dumps(entry, ensure_ascii=False)
+                        data["content"] = (data.get("content") or "") + f"\n\n```rich_mcp\n{block_json}\n```"
+                # Re-inject document blocks (plotly charts, etc. from tool results)
+                doc_blocks = self._message_doc_blocks.get(id(m))
+                if doc_blocks:
+                    for doc_type, block_data in doc_blocks:
+                        block_json = json.dumps(block_data, ensure_ascii=False)
+                        data["content"] = (data.get("content") or "") + f"\n\n```{doc_type}\n{block_json}\n```"
+                tc_data = self._message_tool_calls.get(id(m))
+                if tc_data:
+                    data["tool_calls"] = tc_data
+                av_override = self._message_avatar_overrides.get(id(m))
+                if av_override:
+                    data["avatar_override"] = av_override
+            result.append(data)
+        return result
+
     def _serialize_conversation(self) -> Optional[dict]:
         if not self.session:
             return None
@@ -1419,9 +2049,11 @@ class WebSocketChatController(ChatController):
             "title": title,
             "created_at": created_at,
             "updated_at": now,
-            "model": self.model,
+            "model": "@auto" if self._auto_select else self.model,
+            "auto_underlying_model": self.model if self._auto_select else None,
+            "model_defaults_version": llm_manager.user_config.global_config.model_defaults_version,
             "provider": self.provider,
-            "messages": [m.model_dump(mode="json") for m in messages],
+            "messages": self._serialize_messages(messages),
             "condensed_summary": self.session._condensed_summary,
             "base_system_prompt": self._base_system_prompt,
             "config": self.config.model_dump(mode="json"),
@@ -1465,8 +2097,8 @@ class WebSocketChatController(ChatController):
             return
 
         try:
-            from llming_lodge.providers.llm_provider_models import ReasoningEffort
-            from llming_lodge.messages import LlmSystemMessage, LlmHumanMessage
+            from llming_models.providers.llm_provider_models import ReasoningEffort
+            from llming_models.messages import LlmSystemMessage, LlmHumanMessage
 
             provider = self.session._provider
             all_models = provider.get_models()
@@ -1516,6 +2148,17 @@ class WebSocketChatController(ChatController):
     async def _on_condense_end(self) -> None:
         await self._send({"type": "condense_end"})
         await self._send_context_info()
+        # Prune rich_mcp + tool_calls tracking — condensed messages are gone
+        if self.session:
+            live_ids = {id(m) for m in self.session.history.messages}
+            if self._message_rich_mcp:
+                self._message_rich_mcp = {k: v for k, v in self._message_rich_mcp.items() if k in live_ids}
+            if self._message_doc_blocks:
+                self._message_doc_blocks = {k: v for k, v in self._message_doc_blocks.items() if k in live_ids}
+            if self._message_tool_calls:
+                self._message_tool_calls = {k: v for k, v in self._message_tool_calls.items() if k in live_ids}
+            if self._message_avatar_overrides:
+                self._message_avatar_overrides = {k: v for k, v in self._message_avatar_overrides.items() if k in live_ids}
         # Save after condensation
         data = self._serialize_conversation()
         if data:
@@ -1567,6 +2210,24 @@ class WebSocketChatController(ChatController):
                 "highlights": info.highlights,
             })
 
+        # Add "Auto" virtual model at the top (highest popularity)
+        models.insert(0, {
+            "model": "@auto",
+            "label": "Auto",
+            "icon": "models/auto-select.svg",
+            "provider": "auto",
+            "max_input_tokens": 200000,
+            "max_output_tokens": 16384,
+            "popularity": 100,
+            "speed": 8,
+            "quality": 9,
+            "cost": 5,
+            "memory": 9,
+            "context_label": "200K",
+            "best_use": "Smart routing",
+            "highlights": ["Auto-selects", "Cost-efficient"],
+        })
+
         quick_actions = self._custom_quick_actions or []
 
         # Resolve budget: prefer budget_handler if set
@@ -1587,7 +2248,7 @@ class WebSocketChatController(ChatController):
             "user_name": user_name,
             "user_avatar": self.user_avatar,
             "models": models,
-            "current_model": self.model,
+            "current_model": "@auto" if self._auto_select else self.model,
             "tools": self.get_all_known_tools(),
             "budget": budget,
             "system_prompt": self._base_system_prompt or self.system_prompt,
@@ -1601,6 +2262,7 @@ class WebSocketChatController(ChatController):
             "tts_default_voice": self._tts_default_voice or self._get_speech_service_default_voice(),
             "speech_max_tokens": self._speech_max_tokens,
             "client_renderers": getattr(self.session, '_mcp_client_renderers', None) or [],
+            "model_defaults_version": llm_manager.user_config.global_config.model_defaults_version,
         }
 
 
@@ -1655,6 +2317,17 @@ def build_ws_router():
                 })
             except Exception as e:
                 logger.warning(f"[NUDGE] Failed to send favorites: {e}")
+
+        # Send trusted droplet list for rich MCP rendering
+        try:
+            trusted_uids = await _get_trusted_nudge_uids(controller)
+            if trusted_uids:
+                await controller._send({
+                    "type": "mcp_trust_list",
+                    "nudge_uids": trusted_uids,
+                })
+        except Exception as e:
+            logger.warning(f"[MCP_TRUST] Failed to send trust list: {e}")
 
         logger.info(f"[WS] Client connected to session {session_id}")
 
@@ -1750,6 +2423,140 @@ def _resolve_chat_file_attachments(raw_atts: list, upload_manager) -> list:
     return resolved
 
 
+def _refresh_datetime_preamble(controller: WebSocketChatController) -> None:
+    """Update the context preamble with current date/time in the client's timezone."""
+    tz_name = controller._client_timezone or "UTC"
+    try:
+        tz = ZoneInfo(tz_name)
+    except Exception:
+        tz = ZoneInfo("UTC")
+        tz_name = "UTC"
+    now = datetime.now(tz)
+    dt_line = f"Current date and time: {now.strftime('%A, %Y-%m-%d %H:%M')} ({tz_name})"
+
+    # Update context_preamble: strip any previous datetime line, append fresh one
+    preamble = controller.context_preamble or ""
+    lines = preamble.split("\n")
+    lines = [l for l in lines if not l.startswith("Current date and time:")]
+    # Remove trailing empty lines before appending
+    while lines and lines[-1] == "":
+        lines.pop()
+    lines.append(dt_line)
+    new_preamble = "\n".join(lines)
+
+    controller.context_preamble = new_preamble
+    if controller.session:
+        controller.session._context_preamble = new_preamble
+
+
+_FOLLOWUP_PREAMBLE = """
+## Interactive Follow-Up Questions
+
+You can present interactive questions to the user using a fenced code block with language `followup` containing JSON. The UI renders clickable cards, multiple choice, input fields, and sorting exercises. Use this for quizzes, surveys, parameter collection, or any structured input.
+
+Format:
+```
+​```followup
+{
+  "title": "Optional title",
+  "steps": [
+    {
+      "title": "Optional step title",
+      "elements": [
+        {"type": "cards", "label": "Pick one",
+         "options": [{"label": "Option A", "value": "a", "description": "optional desc"}]},
+        {"type": "choice", "label": "Select", "id": "q1", "select": "single|multiple",
+         "options": ["A", "B", "C"]},
+        {"type": "text", "id": "name", "label": "Your name", "placeholder": "...", "required": true},
+        {"type": "number", "id": "age", "label": "Age", "min": 0, "max": 150, "default": 25, "hint": "tip"},
+        {"type": "sort", "label": "Categorize these",
+         "categories": [{"label": "Cat A", "color": "#27ae60"}, {"label": "Cat B", "color": "#e67e22"}],
+         "items": [{"label": "Item 1", "color": "#e74c3c"}, {"label": "Item 2", "color": "#3498db"}]}
+      ]
+    }
+  ]
+}
+​```
+```
+
+Rules:
+- Single-select cards/choices auto-submit on click. Multi-select and inputs show a Submit button.
+- Multiple steps create a paginated form (prev/next navigation).
+- The user's answers are auto-sent as "Q: <label> A: <value>" lines — you will receive them as a normal user message.
+- **MANDATORY: ALWAYS use a `followup` block when you present options, multiple choice, or expect the user to pick from alternatives.** NEVER write "Reply with A, B, C, or D", NEVER list options as plain text expecting the user to type a letter. EVERY question with options MUST end with a `followup` block. This applies to EVERY message in a conversation, not just the first one — every round of a quiz, every follow-up question, every time you offer choices.
+- For quizzes and multiple choice: put the question text and context in your markdown above, then ALWAYS add a `followup` block with `cards` or `choice` at the end. Do this for EVERY round.
+- Cards get auto-colored from a palette (10 distinct colors) — you do NOT need to specify `color` unless you want a specific one.
+- Columns are auto-detected: long text = 1 column, short labels = 2-3 columns. Override with `"columns": N` if needed.
+- Use emojis in card labels to make them visually engaging (e.g. vocabulary quizzes, mood picks, category icons).
+- Keep it concise — one followup block per message, at the end.
+""".strip()
+
+
+def _inject_followup_preamble(controller: "WebSocketChatController") -> None:
+    """Append the followup format description to the context preamble."""
+    marker = "## Interactive Follow-Up Questions"
+    preamble = controller.context_preamble or ""
+    if marker in preamble:
+        return  # already injected
+    new_preamble = preamble + "\n\n" + _FOLLOWUP_PREAMBLE
+    controller.context_preamble = new_preamble
+    if controller.session:
+        controller.session._context_preamble = new_preamble
+
+
+async def _execute_trust_gated_actions(
+    controller: "WebSocketChatController",
+    ctx: dict,
+    nudge_uid: str,
+    rich: dict,
+) -> None:
+    """Execute trust-gated actions from a rich MCP result.
+
+    Handles inject_messages and trigger_llm_call for trusted/approved droplets.
+    """
+    # Inject messages into chat history
+    inject = rich.get("inject_messages")
+    if inject and isinstance(inject, list):
+        for m in inject:
+            role_str = m.get("role")
+            content = m.get("content")
+            if role_str in ("user", "assistant") and content:
+                role = Role.USER if role_str == "user" else Role.ASSISTANT
+                if controller.session:
+                    controller.session.history.add_message(
+                        ChatMessage(role=role, content=content)
+                    )
+                await controller._send({
+                    "type": "injected_message",
+                    "role": role_str,
+                    "content": content,
+                    "source_nudge": nudge_uid,
+                })
+
+    # Queue a follow-up LLM call
+    trigger = rich.get("trigger_llm_call")
+    if trigger and isinstance(trigger, dict) and trigger.get("prompt"):
+        prompt = trigger["prompt"]
+
+        async def _do_followup():
+            try:
+                if controller.session:
+                    controller.session.history.add_message(
+                        ChatMessage(role=Role.USER, content=prompt)
+                    )
+                    await controller._send({
+                        "type": "injected_message",
+                        "role": "user",
+                        "content": prompt,
+                        "source_nudge": nudge_uid,
+                    })
+                    await controller.generate_response()
+            except Exception as e:
+                logger.error("[RICH_MCP] Follow-up LLM call failed: %s", e)
+
+        asyncio.create_task(_do_followup())
+
+
 async def _handle_client_message(
     controller: WebSocketChatController,
     entry: SessionEntry,
@@ -1761,14 +2568,24 @@ async def _handle_client_message(
     if msg_type == "send_message":
         text = msg.get("text", "").strip()
         images = msg.get("images")
+        # When the user sends only attachments (images/files) with no text,
+        # provide a minimal prompt so all LLM providers have valid input.
+        if not text and images:
+            text = "Analyze the attached content."
         if text or images:
-            # Dev MCP intercept: check if text matches a secret command
-            if text and not images and controller._on_message_intercept:
+            # Built-in dev commands + app-specific intercept
+            intercept_result = None
+            if text and not images:
+                from llming_lodge.dev.dev_commands import handle_dev_command
                 try:
-                    intercept_result = await controller._on_message_intercept(text, controller)
+                    intercept_result = await handle_dev_command(text, controller)
                 except Exception as e:
-                    logger.warning("[WS] on_message_intercept error: %s", e)
-                    intercept_result = None
+                    logger.warning("[WS] handle_dev_command error: %s", e)
+                if intercept_result is None and controller._on_message_intercept:
+                    try:
+                        intercept_result = await controller._on_message_intercept(text, controller)
+                    except Exception as e:
+                        logger.warning("[WS] on_message_intercept error: %s", e)
                 if intercept_result is not None:
                     # Synthetic assistant response (user bubble already rendered client-side)
                     model_info = llm_manager.get_model_info(controller.model)
@@ -1777,9 +2594,10 @@ async def _handle_client_message(
                         "model": controller.model,
                         "model_icon": model_info.model_icon if model_info else "",
                         "model_label": model_info.label if model_info else controller.model,
+                        "intercept": True,
                     })
                     await controller._send({"type": "text_chunk", "content": intercept_result})
-                    await controller._send({"type": "response_completed"})
+                    await controller._send({"type": "response_completed", "intercept": True})
                     await controller._send({
                         "type": "tools_updated",
                         "tools": controller.get_all_known_tools(),
@@ -1788,10 +2606,137 @@ async def _handle_client_message(
 
             async def _run_send():
                 try:
+                    _refresh_datetime_preamble(controller)
                     await controller.send_message(text, images=images)
                 except Exception as e:
                     logger.error(f"[WS] send_message error: {e}")
             asyncio.create_task(_run_send())
+
+            # Early save: persist conversation with user message immediately
+            # so it appears in the sidebar before the LLM responds.
+            async def _early_save():
+                initial_count = len(controller.session.history.messages) if controller.session else 0
+                for _ in range(20):
+                    await asyncio.sleep(0.05)
+                    if controller.session and len(controller.session.history.messages) > initial_count:
+                        break
+                data = controller._serialize_conversation()
+                if data:
+                    await controller._send({"type": "save_conversation", "data": data})
+            asyncio.create_task(_early_save())
+
+    elif msg_type == "client_hello":
+        tz = msg.get("timezone", "UTC")
+        controller._client_timezone = tz
+        _refresh_datetime_preamble(controller)
+        _inject_followup_preamble(controller)
+
+        # Send bolt definitions from eligible nudges:
+        # (a) system nudges, (b) master/global nudges, (c) user's favorites
+        _bolt_bundles = []  # [(uid, bolts)]
+
+        # (a) System nudges
+        from llming_lodge.system_nudges import SYSTEM_NUDGE_REGISTRY
+        for _sn_key, _sn in SYSTEM_NUDGE_REGISTRY.items():
+            _sn_bolts = _sn.get("bolts", [])
+            if _sn_bolts:
+                _bolt_bundles.append((_sn.get("uid", f"sys:{_sn_key}"), _sn_bolts))
+
+        # (b) Master nudges (already loaded on controller during page setup)
+        for _mn in getattr(controller, "_master_nudges_raw", []):
+            _mn_bolts = _mn.get("bolts", [])
+            if _mn_bolts:
+                _bolt_bundles.append((_mn.get("uid"), _mn_bolts))
+
+        # (c) Favorited nudges + any live nudge with bolts visible to this user
+        _already = {uid for uid, _ in _bolt_bundles}
+        if getattr(controller, "_nudge_store", None):
+            try:
+                store = controller._nudge_store
+                coll, _ = store._ensure_colls()
+                _query = {"mode": "live", "bolts": {"$exists": True, "$ne": []}}
+                async for _fn in coll.find(
+                    _query,
+                    {"uid": 1, "bolts": 1, "_id": 0},
+                ):
+                    if _fn["uid"] not in _already:
+                        _bolt_bundles.append((_fn["uid"], _fn["bolts"]))
+                        _already.add(_fn["uid"])
+            except Exception as _e:
+                logger.warning(f"[BOLTS] Failed to load nudge bolts: {_e}")
+
+        # Send all bolt bundles
+        logger.info("[BOLTS] Sending %d bolt bundle(s) to client", len(_bolt_bundles))
+        for _buid, _bbolts in _bolt_bundles:
+            logger.info("[BOLTS]   %s: %d bolt(s)", _buid, len(_bbolts))
+            await controller._send({
+                "type": "bolt_defs",
+                "nudge_uid": _buid,
+                "bolts": _bbolts,
+            })
+
+    elif msg_type == "start_bolt_worker":
+        # Lightweight Worker activation for bolt system — no chat reset.
+        # The bolt engine calls this when a worker_decode bolt fires outside
+        # the droplet and no Worker is running yet.
+        _bolt_uid = msg.get("nudge_uid")
+        if _bolt_uid and getattr(controller, "_nudge_store", None):
+            store = controller._nudge_store
+            user_teams = getattr(controller, "_user_teams", None)
+            _sid = controller.session_id
+
+            if _sid not in _browser_mcp_sessions:
+                _browser_mcp_sessions[_sid] = {
+                    "store": store,
+                    "user_email": controller.user_mail or "",
+                    "user_teams": user_teams or [],
+                    "uids": {_bolt_uid},
+                    "loop": asyncio.get_running_loop(),
+                    "controller": controller,
+                    "pending_requests": {},
+                    "active_mcp_nudges": set(),
+                    "active_tool_names": {},
+                }
+            else:
+                _browser_mcp_sessions[_sid]["uids"].add(_bolt_uid)
+
+            if _bolt_uid not in _browser_mcp_sessions[_sid].get("active_mcp_nudges", set()):
+                async def _deferred_bolt_activate(_ctx, _u):
+                    await asyncio.sleep(0.05)
+                    try:
+                        res = await _activate_browser_mcp(_ctx, _u)
+                        logger.info("[BOLT_WORKER] Activated for %s: %s", _u, res)
+                    except Exception as exc:
+                        logger.warning("[BOLT_WORKER] Activation failed for %s: %s", _u, exc)
+
+                asyncio.create_task(
+                    _deferred_bolt_activate(
+                        _browser_mcp_sessions[_sid], _bolt_uid,
+                    )
+                )
+
+    elif msg_type == "store_bolt_result":
+        # Persist a bolt result as user + assistant messages.
+        # Supports rich_mcp (fenced code block) or plain assistant_text.
+        _user_text = msg.get("user_text", "")
+        _rich_data = msg.get("rich_mcp")
+        _asst_text = msg.get("assistant_text")
+        if _user_text and (_rich_data or _asst_text) and controller.session:
+            user_msg = ChatMessage(role=Role.USER, content=_user_text)
+            controller.session.history.add_message(user_msg)
+            if _rich_data:
+                block_json = json.dumps(_rich_data, ensure_ascii=False)
+                asst_content = f"```rich_mcp\n{block_json}\n```"
+            else:
+                asst_content = _asst_text
+            asst_msg = ChatMessage(role=Role.ASSISTANT, content=asst_content)
+            controller.session.history.add_message(asst_msg)
+            try:
+                data = controller._serialize_conversation()
+                if data:
+                    await controller._send({"type": "save_conversation", "data": data})
+            except Exception as e:
+                logger.warning("[BOLT] store_bolt_result save failed: %s", e)
 
     elif msg_type == "stop_streaming":
         await controller.stop_streaming()
@@ -1866,12 +2811,23 @@ async def _handle_client_message(
                 })
 
     elif msg_type == "new_chat":
+        # Cancel any in-flight streaming
+        if controller._streaming_task and not controller._streaming_task.done():
+            await controller.stop_streaming()
+
         # Save current conversation first
         data = controller._serialize_conversation()
         if data:
             await controller._send({"type": "save_conversation", "data": data})
 
-        # Dev MCP cleanup
+        # Built-in dev cleanup (dev MCPs, remote mode stays active)
+        from llming_lodge.dev.dev_mcp import deactivate_all_dev_mcps
+        try:
+            await deactivate_all_dev_mcps(controller)
+        except Exception as e:
+            logger.warning("[WS] deactivate_all_dev_mcps error: %s", e)
+
+        # App-specific cleanup
         if controller._on_new_chat:
             try:
                 await controller._on_new_chat(controller)
@@ -1880,6 +2836,7 @@ async def _handle_client_message(
 
         # Clear history and create new session
         controller.clear_history()
+        controller._message_rich_mcp.clear()
         old_session_id = controller.session_id
         new_session_id = str(uuid4())
         controller.session_id = new_session_id
@@ -1915,6 +2872,17 @@ async def _handle_client_message(
             _browser_mcp_sessions[new_session_id] = bctx
             controller.tool_config["activate_mcp_nudge"] = {"_session_id": new_session_id}
 
+        # Unlock model and restore user's preference from before droplet
+        if getattr(controller, '_model_locked', False):
+            controller._model_locked = False
+            controller._model_locked_reason = ""
+            await controller._send({"type": "model_unlocked"})
+            saved = getattr(controller, '_saved_model_pref', None)
+            if saved:
+                await controller.switch_model(saved, _force=True)
+                controller._saved_model_pref = None
+                logger.info("[NEW_CHAT] Restored model preference: %s", saved)
+
         # Restore app-level default system prompt
         controller._base_system_prompt = controller._app_system_prompt
         if controller._base_system_prompt:
@@ -1926,12 +2894,19 @@ async def _handle_client_message(
         if preset:
             preset_type = preset.get("type", "project")
 
-            # Server-side nudge fetch: nudge_uid → fetch from MongoDB
+            # Server-side nudge fetch: nudge_uid → fetch from registry or MongoDB
             if preset_type == "nudge" and preset.get("nudge_uid") and getattr(controller, "_nudge_store", None):
                 try:
                     store = controller._nudge_store
                     user_teams = getattr(controller, "_user_teams", None)
-                    nudge = await store.get_for_user(preset["nudge_uid"], controller.user_mail or "", user_teams=user_teams)
+                    is_admin = getattr(controller, "_is_nudge_admin", False)
+
+                    # System nudges: load from in-memory registry
+                    _preset_uid = preset["nudge_uid"]
+                    if is_system_nudge_uid(_preset_uid):
+                        nudge = get_system_nudge(_preset_uid)
+                    else:
+                        nudge = await store.get_for_user(_preset_uid, controller.user_mail or "", user_teams=user_teams, is_admin=is_admin)
                     if nudge:
                         controller._nudge_id = nudge["uid"]
                         nudge_prompt = nudge.get("system_prompt") or ""
@@ -1965,6 +2940,8 @@ async def _handle_client_message(
                             "mode": nudge.get("mode"),
                             "category": nudge.get("category"),
                             "sub_category": nudge.get("sub_category"),
+                            "bolts": nudge.get("bolts", []),
+                            "translations": nudge.get("translations"),
                         }
 
                         # Auto-activate browser MCP if nudge has JS files.
@@ -1996,7 +2973,11 @@ async def _handle_client_message(
                             else:
                                 _browser_mcp_sessions[new_session_id]["uids"].add(_uid)
 
-                            async def _deferred_mcp_activate(_ctx, _u):
+                            # Signal for remote mode polling to detect MCP readiness
+                            _mcp_ready_event = asyncio.Event()
+                            controller._mcp_ready_event = _mcp_ready_event
+
+                            async def _deferred_mcp_activate(_ctx, _u, _evt):
                                 """Run after a short yield so chat_cleared arrives first."""
                                 await asyncio.sleep(0.2)
                                 try:
@@ -2004,12 +2985,30 @@ async def _handle_client_message(
                                     logger.info("[NUDGE] Auto-activated MCP for %s: %s", _u, res)
                                 except Exception as exc:
                                     logger.warning("[NUDGE] MCP auto-activation failed for %s: %s", _u, exc)
+                                finally:
+                                    _evt.set()
 
                             asyncio.create_task(
                                 _deferred_mcp_activate(
                                     _browser_mcp_sessions[new_session_id], _uid,
+                                    _mcp_ready_event,
                                 )
                             )
+
+                        # Auto-activate server-side MCP if nudge has server_mcp capability.
+                        # Unlike browser MCP, this doesn't need deferred activation —
+                        # it's in-process and doesn't require WS round-trip.
+                        _server_mcp_class = (nudge.get("capabilities") or {}).get("server_mcp")
+                        if _server_mcp_class:
+                            async def _deferred_server_mcp(_ctrl, _ndg):
+                                await asyncio.sleep(0.2)
+                                try:
+                                    res = await _activate_server_mcp(_ctrl, _ndg)
+                                    logger.info("[NUDGE] Auto-activated server MCP: %s", res)
+                                except Exception as exc:
+                                    logger.warning("[NUDGE] Server MCP activation failed: %s", exc)
+
+                            asyncio.create_task(_deferred_server_mcp(controller, nudge))
 
                     else:
                         logger.warning(f"[NUDGE] Nudge {preset['nudge_uid']} not found or not visible")
@@ -2107,7 +3106,18 @@ async def _handle_client_message(
             response["nudge_meta"] = nudge_meta
         await controller._send(response)
 
+        # Send bolt definitions to client if nudge has bolts
+        if nudge_meta and nudge_meta.get("bolts"):
+            await controller._send({
+                "type": "bolt_defs",
+                "nudge_uid": nudge_meta["uid"],
+                "bolts": nudge_meta["bolts"],
+            })
+
     elif msg_type == "load_conversation":
+        # Cancel any in-flight streaming
+        if controller._streaming_task and not controller._streaming_task.done():
+            await controller.stop_streaming()
         data = msg.get("data")
         if data:
             await _load_conversation(controller, entry, data)
@@ -2332,6 +3342,13 @@ async def _handle_client_message(
             except Exception:
                 pass
 
+    elif msg_type == "console_logs":
+        if hasattr(controller, '_pending_console_logs') and controller._pending_console_logs:
+            try:
+                controller._pending_console_logs.set_result(msg)
+            except Exception:
+                pass
+
     elif msg_type == "change_language":
         new_lang = msg.get("language", "en-us")
         await _handle_language_change(controller, new_lang)
@@ -2401,7 +3418,7 @@ async def _handle_client_message(
             # Gather tool definitions for Realtime function calling
             # Only include tools explicitly flagged for realtime use
             rt_tools = []
-            from llming_lodge.tools.tool_definition import ToolSource
+            from llming_models.tools.tool_definition import ToolSource
             for tool_name in controller.enabled_tools:
                 tool_def = get_default_registry().get(tool_name)
                 if tool_def and tool_def.realtime_enabled and tool_def.source != ToolSource.PROVIDER_NATIVE:
@@ -2587,6 +3604,12 @@ async def _handle_client_message(
     elif msg_type == "nudge_flush":
         await _handle_nudge_flush(controller, msg)
 
+    elif msg_type == "nudge_unpublish":
+        await _handle_nudge_unpublish(controller, msg)
+
+    elif msg_type == "nudge_revert":
+        await _handle_nudge_revert(controller, msg)
+
     elif msg_type == "nudge_favorite":
         await _handle_nudge_favorite(controller, msg)
 
@@ -2645,13 +3668,170 @@ async def _handle_client_message(
     # ── Browser-hosted MCP messages ───────────────────────
     elif msg_type == "browser_mcp_result":
         request_id = msg.get("request_id")
+        # Look up by current session_id first, then fall back to searching all
+        # sessions by controller or request_id.  After page reload/navigation
+        # the session_id changes but the browser MCP context may still be
+        # keyed under the old session_id.
         ctx = _browser_mcp_sessions.get(controller.session_id)
-        if ctx and request_id and request_id in ctx["pending_requests"]:
-            future = ctx["pending_requests"].pop(request_id)
+        if not ctx or not request_id or request_id not in (ctx or {}).get("pending_requests", {}):
+            # Fallback: find the context that owns this request_id
+            for _sid, _ctx in _browser_mcp_sessions.items():
+                if request_id and request_id in _ctx.get("pending_requests", {}):
+                    ctx = _ctx
+                    # Migrate to current session_id so future lookups work
+                    if _sid != controller.session_id:
+                        _browser_mcp_sessions[controller.session_id] = _browser_mcp_sessions.pop(_sid)
+                        ctx["controller"] = controller
+                        logger.info("[BROWSER_MCP] Migrated context from session %s → %s", _sid, controller.session_id)
+                    break
+        if ctx and request_id and request_id in ctx.get("pending_requests", {}):
+            pending = ctx["pending_requests"].pop(request_id)
+            future = pending["future"] if isinstance(pending, dict) else pending
             if not future.done():
                 future.set_result(msg)
         else:
             logger.warning("[BROWSER_MCP] Unexpected result for request_id=%s", request_id)
+
+    # ── MCP Droplet Trust management ─────────────────────
+    elif msg_type == "mcp_trust:grant":
+        nudge_uid = msg.get("nudge_uid")
+        if nudge_uid:
+            coll = _get_trust_coll(controller)
+            if coll:
+                await _ensure_trust_indexes(coll)
+                await coll.update_one(
+                    {"user_email": (controller.user_mail or "").lower(), "nudge_uid": nudge_uid},
+                    {"$set": {"trusted": True, "granted_at": datetime.now(timezone.utc)}},
+                    upsert=True,
+                )
+                logger.info("[MCP_TRUST] Granted trust for nudge %s by %s", nudge_uid, controller.user_mail)
+
+    elif msg_type == "mcp_trust:revoke":
+        nudge_uid = msg.get("nudge_uid")
+        if nudge_uid:
+            coll = _get_trust_coll(controller)
+            if coll:
+                await _ensure_trust_indexes(coll)
+                await coll.delete_one({
+                    "user_email": (controller.user_mail or "").lower(),
+                    "nudge_uid": nudge_uid,
+                })
+                logger.info("[MCP_TRUST] Revoked trust for nudge %s by %s", nudge_uid, controller.user_mail)
+
+    elif msg_type == "mcp_trust:list":
+        uids = await _get_trusted_nudge_uids(controller)
+        await controller._send({"type": "mcp_trust_list", "nudge_uids": uids})
+
+    elif msg_type == "mcp_trust:execute_once":
+        # One-time execution of trust-gated actions (user approved via prompt)
+        nudge_uid = msg.get("nudge_uid")
+        ctx = _browser_mcp_sessions.get(controller.session_id)
+        if nudge_uid and ctx:
+            rich = {
+                "inject_messages": msg.get("inject_messages"),
+                "trigger_llm_call": msg.get("trigger_llm_call"),
+            }
+            await _execute_trust_gated_actions(controller, ctx, nudge_uid, rich)
+
+    # ── API Key management ────────────────────────────────
+    elif msg_type == "apikeys:list":
+        coll = _get_api_keys_coll(controller)
+        if coll is None:
+            await controller._send({"type": "apikeys:list", "keys": []})
+            return
+        await _ensure_api_keys_indexes(coll)
+        user_email = controller.user_mail or ""
+        docs = await coll.find({"user_email": user_email}).to_list(100)
+        keys = []
+        for d in docs:
+            keys.append({
+                "key_id": d["key_id"],
+                "name": d.get("name", ""),
+                "key_prefix": d.get("key_prefix", ""),
+                "permissions": d.get("permissions", []),
+                "created_at": d.get("created_at", "").isoformat() if isinstance(d.get("created_at"), datetime) else str(d.get("created_at", "")),
+            })
+        await controller._send({"type": "apikeys:list", "keys": keys})
+
+    elif msg_type == "apikeys:create":
+        coll = _get_api_keys_coll(controller)
+        if coll is None:
+            await controller._send({"type": "error", "error_type": "ApiKeyError", "message": "API keys not available"})
+            return
+        await _ensure_api_keys_indexes(coll)
+        user_email = controller.user_mail or ""
+        name = msg.get("name", "Unnamed Key").strip() or "Unnamed Key"
+        permissions = msg.get("permissions", ["manage_droplets", "automate_chat"])
+        # Generate key
+        raw_key = "llming_" + secrets.token_hex(16)
+        key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+        key_id = str(uuid4())
+        doc = {
+            "key_id": key_id,
+            "user_email": user_email,
+            "name": name,
+            "key_prefix": raw_key[:10],
+            "key_hash": key_hash,
+            "permissions": permissions,
+            "created_at": datetime.now(timezone.utc),
+        }
+        await coll.insert_one(doc)
+        await controller._send({
+            "type": "apikeys:created",
+            "key_id": key_id,
+            "name": name,
+            "full_key": raw_key,
+            "permissions": permissions,
+        })
+
+    elif msg_type == "apikeys:delete":
+        coll = _get_api_keys_coll(controller)
+        if coll is None:
+            return
+        user_email = controller.user_mail or ""
+        key_id = msg.get("key_id", "")
+        result = await coll.delete_one({"key_id": key_id, "user_email": user_email})
+        if result.deleted_count:
+            await controller._send({"type": "apikeys:deleted", "key_id": key_id})
+        else:
+            await controller._send({"type": "error", "error_type": "ApiKeyError", "message": "Key not found"})
+
+    # ── App Extensions ──────────────────────────────────────
+    elif msg_type == "app_ext:activate":
+        ext_mgr = getattr(controller, "_app_ext_manager", None)
+        ext_name = msg.get("name", "")
+        if ext_mgr and ext_name:
+            config = await ext_mgr.activate(ext_name, controller)
+            await controller._send({
+                "type": "app_ext:activated",
+                "name": ext_name,
+                "config": config or {},
+            })
+        else:
+            await controller._send({
+                "type": "app_ext:activated",
+                "name": ext_name,
+                "config": {},
+            })
+
+    elif msg_type == "app_ext:deactivate":
+        ext_mgr = getattr(controller, "_app_ext_manager", None)
+        ext_name = msg.get("name", "")
+        if ext_mgr and ext_name:
+            await ext_mgr.deactivate(ext_name, controller)
+
+    elif msg_type == "app_ext:message":
+        ext_mgr = getattr(controller, "_app_ext_manager", None)
+        ext_name = msg.get("name", "")
+        payload = msg.get("payload", {})
+        if ext_mgr and ext_name:
+            response = await ext_mgr.handle_message(ext_name, controller, payload)
+            if response is not None:
+                await controller._send({
+                    "type": "app_ext:message",
+                    "name": ext_name,
+                    "payload": response,
+                })
 
     else:
         logger.warning(f"[WS] Unknown message type: {msg_type}")
@@ -2671,7 +3851,7 @@ async def _apply_doc_plugins(
     if not doc_manager:
         return
 
-    from llming_lodge.doc_plugins.manager import ALL_DOC_PLUGIN_TYPES, TYPE_TOOL_PREFIXES
+    from llming_docs.manager import ALL_DOC_PLUGIN_TYPES, TYPE_TOOL_PREFIXES
 
     old_types = set(doc_manager.enabled_types)
     doc_manager.set_enabled_types(doc_plugins)
@@ -2735,7 +3915,7 @@ async def _auto_enable_restored_doc_tools(
     ``_autoEnableDocTools`` / ``_autoEnableForRenderedBlocks`` (chat-app-core.js).
     Both sides are needed because doc_restore may arrive before or after MCP discovery.
     """
-    from llming_lodge.doc_plugins.manager import _MCP_SERVERS, _TYPE_ALIASES
+    from llming_docs.manager import _MCP_SERVERS, _TYPE_ALIASES
 
     # Collect unique doc types from restored documents
     # Documents have a "type" field (plotly, table, text_doc, presentation, html)
@@ -2968,29 +4148,56 @@ async def _load_conversation(
             _discoverable_sessions[conv_id] = _discoverable_sessions.pop(old_session_id)
             controller.tool_config["consult_nudge"] = {"_session_id": conv_id}
 
+        # Migrate browser MCP session context to new session ID
+        if old_session_id in _browser_mcp_sessions:
+            bctx = _browser_mcp_sessions.pop(old_session_id)
+            bctx["controller"] = controller
+            _browser_mcp_sessions[conv_id] = bctx
+            controller.tool_config["activate_mcp_nudge"] = {"_session_id": conv_id}
+
         # Re-register in registry
         registry = SessionRegistry.get()
         registry.remove(old_session_id)
         registry._sessions[conv_id] = entry
 
-        # Switch model if needed
+        # Switch model if needed — but only if the saved version matches the
+        # current server config version.  When model defaults change (e.g. new
+        # default model), bumping model_defaults_version causes all clients to
+        # use the new default instead of restoring a stale selection.
+        saved_version = data.get("model_defaults_version")
+        current_version = llm_manager.user_config.global_config.model_defaults_version
         loaded_model = data.get("model")
-        if loaded_model and loaded_model != controller.model:
+        if loaded_model and loaded_model != controller.model and saved_version == current_version:
             try:
                 await controller.switch_model(loaded_model)
             except Exception as ex:
                 logger.warning(f"[LOAD] Could not switch to model {loaded_model}: {ex}")
+        elif loaded_model and saved_version != current_version:
+            logger.info("[LOAD] Ignoring stored model %s (saved version %s != current %s)",
+                        loaded_model, saved_version, current_version)
+            # Ensure auto-select is enabled (the new default)
+            if not controller._auto_select:
+                await controller.switch_model("@auto")
 
         # Restore base system prompt
         if data.get("base_system_prompt"):
             controller._base_system_prompt = data["base_system_prompt"]
             controller.update_settings(system_prompt=data["base_system_prompt"])
 
-        # Rebuild history
+        # Rebuild history (restore tool_calls metadata for serialization round-trips)
         controller.session.history = ChatHistory()
+        controller._message_tool_calls = {}
         for msg_dict in data.get("messages", []):
             msg = ChatMessage.model_validate(msg_dict)
             controller.session.history.add_message(msg)
+            # Restore tool_calls tracking for this message
+            tc_data = msg_dict.get("tool_calls")
+            if tc_data and msg.role == Role.ASSISTANT:
+                controller._message_tool_calls[id(msg)] = tc_data
+            # Restore avatar override
+            av_data = msg_dict.get("avatar_override")
+            if av_data and msg.role == Role.ASSISTANT:
+                controller._message_avatar_overrides[id(msg)] = av_data
 
         # Restore condensed summary
         controller.session._condensed_summary = data.get("condensed_summary")
@@ -3016,14 +4223,20 @@ async def _load_conversation(
             try:
                 store = controller._nudge_store
                 user_teams = getattr(controller, "_user_teams", None)
-                from llming_lodge.nudge_store import get_file_cache
-                cached = await get_file_cache().get_files(
-                    data["nudge_id"], store, controller.user_mail or "",
-                    user_teams=user_teams,
-                )
-                if cached:
-                    preset_files = cached
-                nudge = await store.get_for_user(data["nudge_id"], controller.user_mail or "", user_teams=user_teams)
+                _reload_uid = data["nudge_id"]
+
+                # System nudges: load from registry (no MongoDB, no file cache)
+                if is_system_nudge_uid(_reload_uid):
+                    nudge = get_system_nudge(_reload_uid)
+                else:
+                    from llming_lodge.nudge_store import get_file_cache
+                    cached = await get_file_cache().get_files(
+                        _reload_uid, store, controller.user_mail or "",
+                        user_teams=user_teams,
+                    )
+                    if cached:
+                        preset_files = cached
+                    nudge = await store.get_for_user(_reload_uid, controller.user_mail or "", user_teams=user_teams, is_admin=getattr(controller, "_is_nudge_admin", False))
                 if nudge:
                     nudge_meta = {
                         "uid": nudge.get("uid"),
@@ -3037,10 +4250,62 @@ async def _load_conversation(
                         "mode": nudge.get("mode"),
                         "category": nudge.get("category"),
                         "sub_category": nudge.get("sub_category"),
+                        "bolts": nudge.get("bolts", []),
+                        "translations": nudge.get("translations"),
                     }
                     # Apply doc plugin config from nudge
                     if nudge.get("doc_plugins") is not None:
                         await _apply_doc_plugins(controller, entry, nudge["doc_plugins"])
+
+                    # Re-activate browser MCP if nudge has JS files
+                    _nudge_has_js = any(
+                        (f.get("name", "").endswith(".js") or f.get("name", "").endswith(".mjs"))
+                        for f in nudge.get("files", [])
+                    )
+                    if _nudge_has_js:
+                        _uid = nudge["uid"]
+                        if conv_id not in _browser_mcp_sessions:
+                            _browser_mcp_sessions[conv_id] = {
+                                "store": store,
+                                "user_email": controller.user_mail or "",
+                                "user_teams": user_teams or [],
+                                "uids": {_uid},
+                                "loop": asyncio.get_running_loop(),
+                                "controller": controller,
+                                "pending_requests": {},
+                                "active_mcp_nudges": set(),
+                                "active_tool_names": {},
+                            }
+                        else:
+                            _browser_mcp_sessions[conv_id]["uids"].add(_uid)
+                            _browser_mcp_sessions[conv_id]["controller"] = controller
+
+                        async def _deferred_mcp_reactivate(_ctx, _u):
+                            await asyncio.sleep(0.3)
+                            try:
+                                res = await _activate_browser_mcp(_ctx, _u)
+                                logger.info("[LOAD] Re-activated MCP for %s: %s", _u, res)
+                            except Exception as exc:
+                                logger.warning("[LOAD] MCP re-activation failed for %s: %s", _u, exc)
+
+                        asyncio.create_task(
+                            _deferred_mcp_reactivate(
+                                _browser_mcp_sessions[conv_id], _uid,
+                            )
+                        )
+
+                    # Re-activate server-side MCP if nudge has server_mcp capability
+                    _server_mcp_class = (nudge.get("capabilities") or {}).get("server_mcp")
+                    if _server_mcp_class:
+                        async def _deferred_server_mcp_reload(_ctrl, _ndg):
+                            await asyncio.sleep(0.3)
+                            try:
+                                res = await _activate_server_mcp(_ctrl, _ndg)
+                                logger.info("[LOAD] Re-activated server MCP: %s", res)
+                            except Exception as exc:
+                                logger.warning("[LOAD] Server MCP re-activation failed: %s", exc)
+
+                        asyncio.create_task(_deferred_server_mcp_reload(controller, nudge))
             except Exception as e:
                 logger.warning(f"[NUDGE] Failed to fetch nudge for conversation load: {e}")
         # Always create an upload manager for the loaded conversation
@@ -3100,22 +4365,38 @@ async def _handle_nudge_search(controller: WebSocketChatController, msg: dict):
     user_teams = getattr(controller, "_user_teams", None)
     is_admin = getattr(controller, "_is_nudge_admin", False)
     all_users = bool(msg.get("all_users")) and is_admin
+    query = msg.get("query", "")
+    category = msg.get("category", "")
+    mine = msg.get("mine", False)
+    page = msg.get("page", 0)
     try:
         results, has_more = await store.search(
             controller.user_mail or "",
-            query=msg.get("query", ""),
-            category=msg.get("category", ""),
-            mine=msg.get("mine", False),
-            page=msg.get("page", 0),
+            query=query,
+            category=category,
+            mine=mine,
+            page=page,
             page_size=24,
             user_teams=user_teams,
             include_master=is_admin,
             all_users=all_users,
         )
+
+        # Inject matching system nudges on first page (not "mine" tab)
+        if page == 0 and not mine and not all_users:
+            sys_keys = getattr(controller, "_system_nudge_keys", None)
+            sys_matches = search_system_nudges(sys_keys, query=query, category=category)
+            if sys_matches:
+                sys_uids = {n["uid"] for n in sys_matches}
+                # Deduplicate (system nudges first, then MongoDB results)
+                results = [_sys_nudge_meta(n) for n in sys_matches] + [
+                    r for r in results if r.get("uid") not in sys_uids
+                ]
+
         await controller._send({
             "type": "nudge_search_result",
             "nudges": results,
-            "page": msg.get("page", 0),
+            "page": page,
             "has_more": has_more,
         })
     except Exception as e:
@@ -3129,11 +4410,45 @@ async def _handle_nudge_get(controller: WebSocketChatController, msg: dict):
     user_teams = getattr(controller, "_user_teams", None)
     try:
         uid = msg.get("uid", "")
+
+        # System nudges: serve from in-memory registry (read-only)
+        if is_system_nudge_uid(uid):
+            nudge = get_system_nudge(uid)
+            if nudge:
+                nudge = dict(nudge)  # copy so we don't mutate registry
+                nudge["_has_live"] = False
+                nudge["_live_matches"] = True
+            await controller._send({"type": "nudge_detail", "nudge": nudge})
+            return
+
         mode = msg.get("mode")
         if mode:
             nudge = await store.get(uid, mode, controller.user_mail or "", user_teams=user_teams)
         else:
-            nudge = await store.get_for_user(uid, controller.user_mail or "", user_teams=user_teams)
+            nudge = await store.get_for_user(uid, controller.user_mail or "", user_teams=user_teams, is_admin=getattr(controller, "_is_nudge_admin", False))
+
+        # Enrich dev nudges with live publication status for editors
+        if nudge and nudge.get("mode") == "dev" and store._user_can_edit(nudge, controller.user_mail or "", user_teams):
+            live = await store.get(uid, "live", controller.user_mail or "", user_teams)
+            nudge["_has_live"] = live is not None
+            if live:
+                compare_keys = [
+                    "name", "description", "system_prompt", "model", "language",
+                    "suggestions", "capabilities", "category", "sub_category",
+                    "visibility", "icon", "is_master", "auto_discover",
+                    "auto_discover_when", "doc_plugins", "version",
+                ]
+                matches = all(nudge.get(k) == live.get(k) for k in compare_keys)
+                # Also compare files by name+size (not content, too heavy)
+                dev_files = [(f.get("name"), f.get("size")) for f in (nudge.get("files") or [])]
+                live_files = [(f.get("name"), f.get("size")) for f in (live.get("files") or [])]
+                if dev_files != live_files:
+                    matches = False
+                nudge["_live_matches"] = matches
+                nudge["_live_version"] = live.get("version", "")
+            else:
+                nudge["_live_matches"] = False
+
         await controller._send({
             "type": "nudge_detail",
             "nudge": nudge,
@@ -3145,6 +4460,10 @@ async def _handle_nudge_get(controller: WebSocketChatController, msg: dict):
 async def _handle_nudge_save(controller: WebSocketChatController, msg: dict):
     store = getattr(controller, "_nudge_store", None)
     if not store:
+        return
+    # System nudges are read-only
+    if is_system_nudge_uid(msg.get("data", {}).get("uid", "")):
+        await controller._send({"type": "nudge_error", "error": "System nudges cannot be modified"})
         return
     user_teams = getattr(controller, "_user_teams", None)
     is_admin = getattr(controller, "_is_nudge_admin", False)
@@ -3184,6 +4503,8 @@ async def _handle_nudge_delete(controller: WebSocketChatController, msg: dict):
     store = getattr(controller, "_nudge_store", None)
     if not store:
         return
+    if is_system_nudge_uid(msg.get("uid", "")):
+        return
     user_teams = getattr(controller, "_user_teams", None)
     try:
         uid = msg.get("uid", "")
@@ -3206,10 +4527,13 @@ async def _handle_nudge_flush(controller: WebSocketChatController, msg: dict):
     store = getattr(controller, "_nudge_store", None)
     if not store:
         return
+    if is_system_nudge_uid(msg.get("uid", "")):
+        return
     user_teams = getattr(controller, "_user_teams", None)
     try:
         uid = msg.get("uid", "")
-        ok = await store.flush_to_live(uid, controller.user_mail or "", user_teams=user_teams)
+        is_admin = getattr(controller, "_is_nudge_admin", False)
+        ok = await store.flush_to_live(uid, controller.user_mail or "", user_teams=user_teams, is_admin=is_admin)
         await controller._send({
             "type": "nudge_flushed",
             "uid": uid,
@@ -3223,6 +4547,58 @@ async def _handle_nudge_flush(controller: WebSocketChatController, msg: dict):
         })
     except Exception as e:
         logger.error(f"[NUDGE] Flush failed: {e}", exc_info=True)
+
+
+async def _handle_nudge_unpublish(controller: WebSocketChatController, msg: dict):
+    store = getattr(controller, "_nudge_store", None)
+    if not store:
+        return
+    if is_system_nudge_uid(msg.get("uid", "")):
+        return
+    user_teams = getattr(controller, "_user_teams", None)
+    try:
+        uid = msg.get("uid", "")
+        is_admin = getattr(controller, "_is_nudge_admin", False)
+        ok = await store.unpublish(uid, controller.user_mail or "", user_teams=user_teams, is_admin=is_admin)
+        await controller._send({
+            "type": "nudge_unpublished",
+            "uid": uid,
+            "ok": ok,
+        })
+    except PermissionError as e:
+        await controller._send({
+            "type": "error",
+            "error_type": "PermissionError",
+            "message": str(e),
+        })
+    except Exception as e:
+        logger.error(f"[NUDGE] Unpublish failed: {e}", exc_info=True)
+
+
+async def _handle_nudge_revert(controller: WebSocketChatController, msg: dict):
+    store = getattr(controller, "_nudge_store", None)
+    if not store:
+        return
+    if is_system_nudge_uid(msg.get("uid", "")):
+        return
+    user_teams = getattr(controller, "_user_teams", None)
+    try:
+        uid = msg.get("uid", "")
+        is_admin = getattr(controller, "_is_nudge_admin", False)
+        ok = await store.revert_to_live(uid, controller.user_mail or "", user_teams=user_teams, is_admin=is_admin)
+        await controller._send({
+            "type": "nudge_reverted",
+            "uid": uid,
+            "ok": ok,
+        })
+    except PermissionError as e:
+        await controller._send({
+            "type": "error",
+            "error_type": "PermissionError",
+            "message": str(e),
+        })
+    except Exception as e:
+        logger.error(f"[NUDGE] Revert failed: {e}", exc_info=True)
 
 
 async def _handle_nudge_favorite(controller: WebSocketChatController, msg: dict):
@@ -3254,7 +4630,12 @@ async def _handle_nudge_validate_favorites(controller: WebSocketChatController, 
         return
     user_teams = getattr(controller, "_user_teams", None)
     try:
-        valid_uids = await store.validate_visible(uids, controller.user_mail or "", user_teams)
+        # System nudge UIDs are always valid (visible to everyone)
+        sys_valid = [u for u in uids if is_system_nudge_uid(u) and get_system_nudge(u)]
+        db_uids = [u for u in uids if not is_system_nudge_uid(u)]
+        valid_uids = sys_valid
+        if db_uids:
+            valid_uids += await store.validate_visible(db_uids, controller.user_mail or "", user_teams)
         await controller._send({
             "type": "nudge_favorites_validated",
             "valid_uids": valid_uids,

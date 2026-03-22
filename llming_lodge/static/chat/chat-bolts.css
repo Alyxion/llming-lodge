@@ -1,0 +1,239 @@
+/* ── Bolt suggestion chips ─────────────────────────────── */
+
+.cv2-bolt-chips {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 6px;
+  padding: 3px 12px 1px;
+  position: absolute;
+  bottom: 100%;
+  left: 0;
+  right: 0;
+  z-index: 10;
+  pointer-events: none;
+  opacity: 0;
+  transform: translateY(4px);
+  transition: opacity 0.18s ease, transform 0.18s ease;
+  overflow-x: auto;
+}
+.cv2-bolt-chips.visible {
+  pointer-events: auto;
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.cv2-bolt-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 12px 4px 8px;
+  border-radius: 16px;
+  font-size: 12.5px;
+  font-weight: 500;
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.15s ease, box-shadow 0.15s ease, transform 0.1s ease;
+  white-space: nowrap;
+  line-height: 1.4;
+}
+.cv2-bolt-chip:active {
+  transform: scale(0.96);
+}
+.cv2-bolt-chip .material-icons {
+  font-size: 15px;
+}
+
+/* Light theme */
+.cv2-bolt-chip {
+  background: rgba(59, 130, 246, 0.10);
+  color: #2563eb;
+  border: 1px solid rgba(59, 130, 246, 0.20);
+}
+.cv2-bolt-chip:hover {
+  background: rgba(59, 130, 246, 0.18);
+  box-shadow: 0 2px 8px rgba(59, 130, 246, 0.15);
+}
+/* Dark theme */
+.cv2-dark .cv2-bolt-chip {
+  background: rgba(96, 165, 250, 0.12);
+  color: #93bbfd;
+  border: 1px solid rgba(96, 165, 250, 0.22);
+}
+.cv2-dark .cv2-bolt-chip:hover {
+  background: rgba(96, 165, 250, 0.22);
+  box-shadow: 0 2px 8px rgba(96, 165, 250, 0.18);
+}
+
+.cv2-bolt-chip-shortcut {
+  font-size: 10px;
+  opacity: 0.55;
+  margin-left: 2px;
+}
+
+/* ── Bolt autocomplete overlay ────────────────────────── */
+
+.cv2-bolt-autocomplete {
+  position: absolute;
+  bottom: 100%;
+  left: 0;
+  right: 0;
+  max-height: 320px;
+  overflow-y: auto;
+  z-index: 20;
+  border-radius: 12px 12px 0 0;
+  padding: 6px 0;
+  opacity: 0;
+  transform: translateY(6px);
+  transition: opacity 0.15s ease, transform 0.15s ease;
+  pointer-events: none;
+}
+.cv2-bolt-autocomplete.visible {
+  opacity: 1;
+  transform: translateY(0);
+  pointer-events: auto;
+}
+
+/* Light */
+.cv2-bolt-autocomplete {
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  box-shadow: 0 -4px 24px rgba(0,0,0,0.10);
+}
+/* Dark */
+.cv2-dark .cv2-bolt-autocomplete {
+  background: #1e2130;
+  border: 1px solid rgba(255,255,255,0.08);
+  box-shadow: 0 -4px 24px rgba(0,0,0,0.35);
+}
+
+.cv2-bolt-ac-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 14px;
+  cursor: pointer;
+  transition: background 0.1s ease;
+}
+.cv2-bolt-ac-item:hover,
+.cv2-bolt-ac-item.active {
+  background: rgba(59, 130, 246, 0.08);
+}
+.cv2-dark .cv2-bolt-ac-item:hover,
+.cv2-dark .cv2-bolt-ac-item.active {
+  background: rgba(96, 165, 250, 0.12);
+}
+
+.cv2-bolt-ac-item .material-icons {
+  font-size: 18px;
+  opacity: 0.6;
+}
+.cv2-bolt-ac-cmd {
+  font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+  font-size: 13px;
+  font-weight: 600;
+  min-width: 100px;
+}
+.cv2-bolt-ac-desc {
+  font-size: 12.5px;
+  opacity: 0.6;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cv2-bolt-ac-alias {
+  font-size: 11px;
+  opacity: 0.4;
+  font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+}
+
+/* ── Bolt section header in autocomplete ──────────────── */
+.cv2-bolt-ac-header {
+  padding: 6px 14px 2px;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  opacity: 0.4;
+}
+
+/* ── Bolt revive chip (persistent, fixed in header) ───── */
+.cv2-bolt-revive-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 10px 3px 7px;
+  border-radius: 14px;
+  font-size: 11.5px;
+  font-weight: 500;
+  cursor: pointer;
+  animation: cv2-bolt-revive-in 0.3s ease;
+}
+.cv2-bolt-revive-chip {
+  background: rgba(16, 185, 129, 0.12);
+  color: #059669;
+  border: 1px solid rgba(16, 185, 129, 0.20);
+}
+.cv2-dark .cv2-bolt-revive-chip {
+  background: rgba(52, 211, 153, 0.12);
+  color: #6ee7b7;
+  border: 1px solid rgba(52, 211, 153, 0.20);
+}
+.cv2-bolt-revive-chip .material-icons {
+  font-size: 14px;
+}
+
+@keyframes cv2-bolt-revive-in {
+  from { opacity: 0; transform: scale(0.9); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+/* ── Bolt chips in nudge greeting ─────────────────────── */
+.cv2-nudge-bolts {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(0,0,0,0.06);
+}
+.cv2-dark .cv2-nudge-bolts {
+  border-top-color: rgba(255,255,255,0.06);
+}
+.cv2-nudge-bolts-label {
+  font-size: 10.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  opacity: 0.4;
+  margin-bottom: 8px;
+}
+.cv2-nudge-bolts-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.cv2-nudge-bolt-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px 4px 7px;
+  border-radius: 14px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  border: none;
+  transition: background 0.15s ease, transform 0.1s ease;
+  background: rgba(59, 130, 246, 0.08);
+  color: #2563eb;
+}
+.cv2-nudge-bolt-chip:hover {
+  background: rgba(59, 130, 246, 0.16);
+}
+.cv2-nudge-bolt-chip:active {
+  transform: scale(0.96);
+}
+.cv2-dark .cv2-nudge-bolt-chip {
+  background: rgba(96, 165, 250, 0.10);
+  color: #93bbfd;
+}
+.cv2-dark .cv2-nudge-bolt-chip:hover {
+  background: rgba(96, 165, 250, 0.20);
+}
