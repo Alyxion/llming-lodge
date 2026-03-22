@@ -1062,10 +1062,10 @@
   margin: 0 auto 8px;
   pointer-events: none;
 }
-/* Light mode — Lechler globe light-theme blue */
+/* Light mode — accent blue */
 .cv2-logo-stroke { stroke: #003B80; }
 .cv2-logo-fill   { fill: #003B80; }
-/* Dark mode — Lechler globe arc blue */
+/* Dark mode — accent blue */
 #chat-app.cv2-dark .cv2-logo-stroke { stroke: #4a90d0; }
 #chat-app.cv2-dark .cv2-logo-fill   { fill: #4a90d0; }
 /* Hide on small screens */

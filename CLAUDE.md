@@ -189,7 +189,7 @@ const _RICH_MCP_VENDOR_LIBS = {
   - Style fixes and improvements automatically apply to ALL conversations (old and new)
   - Storage size stays small (no CSS/JS bloat in every message)
   - No stale rendering code baked into saved conversations
-  - Same pattern as the nozzle code finder — data only, never presentation
+  - Same pattern as the product code finder — data only, never presentation
 - **Path prefix is `/chat-static/`**, NOT `/static/chat/`. The `static/chat/` directory is mounted at `/chat-static/` in `server.py`.
 - **Always check `resp.ok`** before using fetch results. A catch-all page handler returns a full HTML page for 404s — if injected as a `<script>` tag in the srcdoc, it causes unexpected scripts to execute inside the sandboxed iframe, leading to cascading errors.
 - **Never use CDN URLs** in vendor_libs — the sandbox iframe has no network access (no `allow-same-origin`). All libs must be inlined.
@@ -209,14 +209,14 @@ Tests use **pytest-playwright** (Python, not Node) to drive a real Chromium brow
    ```bash
    # Option A: Inline launcher (recommended for CI)
    LLMING_MOCK_USERS=1 python -c "
-   from lechler_ai.server import setup_app
+   from my_app.server import setup_app
    from nicegui import ui
    setup_app()
    ui.run(port=8080, reload=False, show=False)
    "
 
    # Option B: Normal app (auto-reload on — works if you don't edit files mid-test)
-   LLMING_MOCK_USERS=1 poetry run python -m lechler_ai.app
+   LLMING_MOCK_USERS=1 poetry run python -m my_app
    ```
 
 2. **Redis + MongoDB running** (for token cache, user data, nudges)
@@ -231,7 +231,7 @@ Tests use **pytest-playwright** (Python, not Node) to drive a real Chromium brow
 ### Running tests
 
 ```bash
-cd lechler_ai
+cd my_app
 poetry run pytest tests/e2e/ -v --timeout=180
 ```
 
@@ -303,7 +303,7 @@ page.evaluate("() => window.__chatApp.currentModel")
 
 - **Tool pending indicators persist.** `.cv2-tool-pending` stays in the DOM even after the tool completes on the server. Don't use `wait_for_tools_done()` — verify artifacts directly (`.cv2-doc-plugin-block`, `.cv2-email-draft`).
 
-- **Auto-reload kills sessions.** NiceGUI's WatchFiles monitors `lechler_ai/`, `salesbot/`, and `dependencies/`. Editing test files triggers a reload. Use `reload=False`.
+- **Auto-reload kills sessions.** NiceGUI's WatchFiles monitors the app directory and dependencies. Editing test files triggers a reload. Use `reload=False`.
 
 - **`send_and_wait` relies on `window.__chatApp.streaming`.** It waits for streaming to start (`true`) then end (`false`). If the AI response is extremely fast (<100ms), there's a theoretical race — practically never happens with network latency.
 

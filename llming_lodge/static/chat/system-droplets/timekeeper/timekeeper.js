@@ -1629,7 +1629,7 @@
             const label = state.timer.pomodoroMode
               ? (state.timer.pomodoroOnBreak ? 'Break over!' : task ? `${task} — done!` : 'Focus session complete!')
               : task ? `${task} — done!` : 'Timer finished!';
-            try { new Notification('Timekeeper', { body: label, icon: '/static/logo/Lechler_Company-Logo.svg' }); } catch (_) {}
+            try { new Notification('Timekeeper', { body: label, icon: '/chat-static/favicon.ico' }); } catch (_) {}
           }
           handleTimerComplete();
           return;

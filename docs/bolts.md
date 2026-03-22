@@ -19,7 +19,7 @@ and mini-apps at the speed of typing.
 - Bolts **live inside nudges** (droplets). Each nudge can define bolts in its
   **Bolts tab**. This ties bolt availability, permissions, and MCP tool access
   to the nudge that owns them.
-- The UI label "Bolts" is **host-app configurable** (e.g. Lechler shows "Jets").
+- The UI label "Bolts" is **host-app configurable** (e.g. a host app can show "Jets").
 - Both **English** and **alias** command names are recognized (i18n-ready,
   extensible to more languages).
 - **Two trigger modes**: explicit `/command` with autocomplete, or **passive
@@ -293,7 +293,7 @@ Bolts live inside nudges (droplets). Each nudge can define zero or more bolts
 in its **Bolts tab** in the nudge editor. This keeps bolt configuration,
 permissions, and MCP tool availability tied to the nudge that owns them.
 
-The host app can rename "Bolts" in the UI (e.g. Lechler uses "Jets").
+The host app can rename "Bolts" in the UI (e.g. a host app may use "Jets").
 
 ### Bolt Definition (inside a nudge)
 
