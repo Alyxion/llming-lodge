@@ -61,6 +61,8 @@
   "chat.download": "下载",
   "chat.copied": "已复制！",
   "chat.export": "导出",
+  "chat.import": "导入",
+  "chat.data_management": "数据",
   "chat.clear_all": "全部清除",
   "chat.general_category": "通用",
   "chat.ctx_history": "历史",

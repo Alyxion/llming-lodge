@@ -224,6 +224,7 @@ class ChatUserConfig(BaseModel):
     on_message_intercept: Any = None  # async (text, controller) -> str|None — intercept before LLM
     on_new_chat: Any = None  # async (controller) -> None — cleanup on new chat
     app_extensions: list[Any] = Field(default_factory=list)  # list of AppExtension instances (lazy-loaded on demand)
+    custom_ws_handlers: dict[str, Any] = Field(default_factory=dict)  # msg_type → async (msg, controller) handlers for custom WS message types
 
 
 class TeamInfo(BaseModel):

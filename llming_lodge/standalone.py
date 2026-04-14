@@ -103,9 +103,9 @@ def create_app():
     from llming_lodge.chat_config import ChatAppConfig
     from llming_lodge.server import (
         get_static_path, get_chat_static_path, get_ws_router,
-        API_PREFIX, STATIC_PREFIX, sign_auth_token,
-        AUTH_COOKIE_NAME, SESSION_COOKIE_NAME,
+        API_PREFIX, STATIC_PREFIX,
     )
+    from llming_com.auth import get_auth as _auth, AUTH_COOKIE_NAME, SESSION_COOKIE_NAME
 
     @asynccontextmanager
     async def lifespan(_a):
@@ -168,7 +168,7 @@ def create_app():
         html = build_chat_html(config_json, "[]", "Chat")
 
         # Set auth + session cookies on response
-        token = sign_auth_token(session_id)
+        token = _auth().sign_auth_token(session_id)
         response = HTMLResponse(html)
         response.set_cookie(
             AUTH_COOKIE_NAME, token,

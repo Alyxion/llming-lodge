@@ -56,6 +56,8 @@
   "chat.download": "डाउनलोड करें",
   "chat.copied": "कॉपी हो गया!",
   "chat.export": "निर्यात",
+  "chat.import": "आयात",
+  "chat.data_management": "डेटा",
   "chat.clear_all": "सब साफ करें",
   "chat.general_category": "सामान्य",
   "chat.ctx_history": "इतिहास",

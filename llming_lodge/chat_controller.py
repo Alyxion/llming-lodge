@@ -75,10 +75,10 @@ class ChatController(ABC):
 
         # Set default model — @auto enables intelligent auto-selection
         if initial_model == "@auto" or (not initial_model):
-            # Default to auto-select: start on Sonnet, upgrade to Opus when needed
-            default_medium = llm_manager.get_default_model("medium")
+            # Default to auto-select: start on GPT-5.4, upgrade to Opus when needed
+            default_large = llm_manager.get_default_model("large")
             self.model = next(
-                (info.model for info in available_llms if info.name == default_medium or info.model == default_medium),
+                (info.model for info in available_llms if info.name == default_large or info.model == default_large),
                 available_llms[0].model
             )
             self._auto_select = True
@@ -175,80 +175,23 @@ class ChatController(ABC):
 
     # ── Auto-select model routing ──────────────────────────────
 
-    _AUTO_SELECT_OPUS_KEYWORDS = re.compile(
-        r"analys|compar|explain.*detail|deep.*dive|research|summar.*report"
-        r"|evaluat|review.*code|refactor|architect|design.*system"
-        r"|write.*essay|write.*report|create.*present|build.*plan",
-        re.IGNORECASE,
-    )
-
     async def _auto_select_model(self, message: str, images: list | None) -> None:
-        """Pick the best model for this turn based on context.
+        """Ensure the auto-select base model is active.
 
         Called before ``send_message()`` when ``_auto_select`` is True.
-        Silently switches the underlying model without notifying the user.
-
-        Routing rules:
-        - Attachments (images/files) → Opus (best multimodal + long context)
-        - Complex tool-heavy context (many tool calls in history) → Opus
-        - Long conversation (>20 messages) → Opus (better context handling)
-        - Analytical/complex keywords → Opus
-        - Everything else → Sonnet (fast, cost-effective)
+        Always uses the configured default large model (GPT-5.4).
         """
-        # Candidate models (first available wins)
-        sonnet = llm_manager.get_default_model("medium") or "claude_sonnet"
-        opus_name = "claude_opus"
-        opus_info = llm_manager.get_model_info(opus_name)
-        if not opus_info:
-            # Opus not available — stay on current
-            logger.info("[AUTO-SELECT] Opus not available, staying on %s", self.model)
-            return
-
-        target = sonnet  # default: fast model
-        reason = "simple query"
-
-        # ── Decision factors ──
-        has_images = bool(images)
-        has_files = False
-        try:
-            from llming_lodge.documents.upload_manager import UploadManager
-            um = UploadManager.get(getattr(self, 'session_id', ''))
-            has_files = bool(um and um.files)
-        except Exception:
-            pass
-
-        history_len = len(self.session.history.messages) if self.session else 0
-        tool_calls_in_history = sum(
-            1 for msg in (self.session.history.messages if self.session else [])
-            if msg.role == Role.ASSISTANT and id(msg) in self._message_tool_calls
-        )
-
-        if has_images or has_files:
-            target = opus_name
-            reason = f"attachments present (images={has_images}, files={has_files})"
-        elif tool_calls_in_history >= 3:
-            target = opus_name
-            reason = f"complex tool usage ({tool_calls_in_history} tool calls in history)"
-        elif history_len > 20:
-            target = opus_name
-            reason = f"long conversation ({history_len} messages)"
-        elif self._AUTO_SELECT_OPUS_KEYWORDS.search(message):
-            target = opus_name
-            reason = f"complex query (keyword match)"
-
-        # Resolve actual model name
-        target_info = llm_manager.get_model_info(target)
+        base_model = llm_manager.get_default_model("large") or "gpt-5.4"
+        target_info = llm_manager.get_model_info(base_model)
         if not target_info:
-            logger.warning("[AUTO-SELECT] Target %s not available", target)
+            logger.warning("[AUTO-SELECT] Base model %s not available", base_model)
             return
 
         actual_model = target_info.model
         if actual_model != self.model:
             old = self.model
             await self._silent_switch_model(actual_model)
-            logger.info("[AUTO-SELECT] %s → %s (reason: %s)", old, actual_model, reason)
-        else:
-            logger.info("[AUTO-SELECT] Staying on %s (reason: %s)", self.model, reason)
+            logger.info("[AUTO-SELECT] %s → %s", old, actual_model)
 
     async def _silent_switch_model(self, model: str) -> None:
         """Switch model without sending model_switched to the client.
@@ -302,7 +245,7 @@ class ChatController(ABC):
             self.session._condensed_summary = old_condensed
 
         self.config = new_config
-        self.model = model
+        self.model = model_info.model  # actual model/deployment name
         self.provider = new_provider
         self.available_tools = new_available_tools
         self.enabled_tools = new_enabled_tools
@@ -330,8 +273,8 @@ class ChatController(ABC):
             await self.stop_streaming()
             return ""
 
-        # Auto-select: pick optimal model before sending
-        if self._auto_select:
+        # Auto-select: pick optimal model before sending (skip if model is locked by a droplet)
+        if self._auto_select and not getattr(self, '_model_locked', False):
             await self._auto_select_model(message, images)
 
         # Reset streaming state
@@ -444,13 +387,13 @@ class ChatController(ABC):
                 self._auto_select = True
                 self._auto_select_base_model = self.model
                 logger.info("[AUTO-SELECT] Enabled — base model: %s", self.model)
-                # Start on Sonnet (fast default)
-                sonnet = llm_manager.get_default_model("medium") or "claude_sonnet"
-                sonnet_info = llm_manager.get_model_info(sonnet)
-                if sonnet_info and sonnet_info.model != self.model:
+                # Start on GPT-5.4 (fast capable default)
+                default = llm_manager.get_default_model("large") or "gpt-5.4"
+                default_info = llm_manager.get_model_info(default)
+                if default_info and default_info.model != self.model:
                     old = self.model
-                    await self._silent_switch_model(sonnet_info.model)
-                    logger.info("[AUTO-SELECT] Initial switch: %s → %s", old, sonnet_info.model)
+                    await self._silent_switch_model(default_info.model)
+                    logger.info("[AUTO-SELECT] Initial switch: %s → %s", old, default_info.model)
                 # Notify client of the switch
                 self._on_model_switched(self.model, "@auto")
             return
@@ -535,7 +478,7 @@ class ChatController(ABC):
 
         # Update state
         self.config = new_config
-        self.model = model
+        self.model = model_info.model  # actual model/deployment name
         self.provider = new_provider
         self.available_tools = new_available_tools
         self.enabled_tools = new_enabled_tools
@@ -543,7 +486,7 @@ class ChatController(ABC):
         self.max_output_tokens = model_info.max_output_tokens
 
         # Notify view
-        self._on_model_switched(old_model, model)
+        self._on_model_switched(old_model, model_info.model)
 
     def update_settings(
         self,

@@ -12,16 +12,6 @@ import threading
 from typing import Optional
 
 # Auth — delegated to llming-com shared library
-from llming_com.auth import (  # noqa: F401 — re-exported for backward compat
-    AUTH_COOKIE_NAME,
-    SESSION_COOKIE_NAME,
-    IDENTITY_COOKIE_NAME,
-    sign_auth_token,
-    verify_auth_cookie,
-    sign_identity_token,
-    verify_identity_cookie,
-    make_auth_cookie_value,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -603,6 +593,7 @@ def build_http_router():
         controller = entry.controller
         controller.set_websocket(ws)
         entry.websocket = ws
+        entry.last_heartbeat = _time.monotonic()
 
         # Wire condensation callbacks
         controller._wire_condensation()
@@ -664,9 +655,11 @@ def setup_routes(app, *, debug: bool = False, nudge_store=None) -> None:
     - Public API — droplets + remote chat (if ``nudge_store`` is provided)
     """
     from starlette.staticfiles import StaticFiles
+    from llming_com.client_static import mount_client_static
 
     app.mount(STATIC_PREFIX, StaticFiles(directory=get_static_path()), name="llming-static")
     app.mount("/chat-static", StaticFiles(directory=get_chat_static_path()), name="chat-static")
+    mount_client_static(app)
 
     app.include_router(build_http_router())
 

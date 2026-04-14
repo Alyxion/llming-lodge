@@ -1437,6 +1437,14 @@
   color: var(--chat-text-muted);
   font-style: italic;
 }
+.cv2-tool-narration {
+  display: block;
+  font-size: 13px;
+  color: var(--chat-text-muted);
+  font-style: italic;
+  margin: 4px 0 8px 22px;
+  opacity: 0.8;
+}
 .cv2-tool-expandable { cursor: pointer; border-radius: 6px; padding: 4px 6px; margin: 0 -6px; }
 .cv2-tool-expandable:hover { background: rgba(128,128,128,0.08); }
 .cv2-tool-detail {

@@ -376,6 +376,24 @@
   color: #f5a623;
 }
 
+.cv2-pv-card-delete {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  background: none;
+  border: none;
+  color: var(--chat-text-muted, #888);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s, color 0.15s;
+  padding: 2px;
+  border-radius: 4px;
+}
+.cv2-pv-card:hover .cv2-pv-card-delete { opacity: 1; }
+.cv2-pv-card-delete:hover { color: #e53935; }
+/* Shift star left when delete is present */
+.cv2-pv-card:has(.cv2-pv-card-delete) .cv2-pv-card-star { right: 32px; }
+
 .cv2-pv-card-date {
   font-size: 11px;
   color: var(--chat-text-muted, #888);

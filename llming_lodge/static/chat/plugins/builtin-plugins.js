@@ -4863,6 +4863,149 @@ function _richMcpLegacyIframe(container, renderSpec, title) {
 
 
 /* ══════════════════════════════════════════════════════════════
+   Kantini Likes — inline meal reaction system
+   ══════════════════════════════════════════════════════════════ */
+
+const _kantiniLikes = {
+  // Cache: meal_id → {total, emojis: {emoji: count}, likers: [{name, avatar, emoji}]}
+  _cache: {},
+  _userEmail: '',
+  _emojis: ['👍', '😋', '🔥', '❤️', '🤮'],
+
+  init() {
+    // Listen for server responses
+    document.addEventListener('kantini-likes', (e) => {
+      const d = e.detail;
+      if (d.likes_batch) {
+        Object.assign(this._cache, d.likes_batch);
+        this.renderAll();
+      } else if (d.meal_id && d.likes) {
+        this._cache[d.meal_id] = d.likes;
+        this.renderBar(d.meal_id);
+      }
+    });
+    // Get user email from config
+    const app = window.__chatApp;
+    if (app && app.config) this._userEmail = app.config.userEmail || '';
+  },
+
+  /** Ensure user email is set (lazy — config may not be ready at init time). */
+  _ensureEmail() {
+    if (!this._userEmail) {
+      const app = window.__chatApp;
+      if (app && app.config) this._userEmail = app.config.userEmail || '';
+    }
+  },
+
+  /** Send a WS message to the server. */
+  _send(payload) {
+    const app = window.__chatApp;
+    if (app && app.ws) app.ws.send({ type: 'kantini_action', ...payload });
+  },
+
+  /** Fetch likes for a set of meal IDs. */
+  fetchLikes(mealIds) {
+    if (!mealIds.length) return;
+    this._send({ action: 'get_likes', meal_ids: mealIds });
+  },
+
+  /** Toggle a like on/off. */
+  toggle(mealId, emoji) {
+    this._ensureEmail();
+    const summary = this._cache[mealId];
+    const isOwn = summary && summary.likers &&
+      summary.likers.some(l => l.emoji === emoji && l.email === this._userEmail);
+    this._send({ action: isOwn ? 'unlike' : 'like', meal_id: mealId, emoji });
+  },
+
+  /** Build a unique meal ID from week/row/col. */
+  mealId(spec, meal) {
+    return `${spec.year || 0}-${spec.week_number || 0}-${meal.col}-${meal.row}`;
+  },
+
+  /** Render a likes bar for one meal. */
+  renderBar(mealId) {
+    this._ensureEmail();
+    const bars = document.querySelectorAll(`.kvi-likes[data-meal-id="${mealId}"]`);
+    const summary = this._cache[mealId] || { total: 0, emojis: {}, likers: [] };
+    for (const bar of bars) {
+      if (summary.total === 0) {
+        bar.innerHTML = `<span class="kvi-like-btn kvi-like-add" data-meal-id="${mealId}" data-emoji="👍" title="Like">👍</span>`;
+        continue;
+      }
+      let html = '';
+      for (const [emoji, count] of Object.entries(summary.emojis)) {
+        const isOwn = summary.likers.some(l => l.emoji === emoji && l.email === this._userEmail);
+        const names = summary.likers.filter(l => l.emoji === emoji).map(l => l.name).join(', ');
+        html += `<span class="kvi-like-btn${isOwn ? ' kvi-like-own' : ''}" data-meal-id="${mealId}" data-emoji="${emoji}" title="${names}">${emoji}<span class="kvi-like-count">${count}</span></span>`;
+      }
+      html += `<span class="kvi-like-btn kvi-like-add" data-meal-id="${mealId}" data-emoji="👍" title="Like">+</span>`;
+      bar.innerHTML = html;
+    }
+  },
+
+  /** Render all known likes bars. */
+  renderAll() {
+    document.querySelectorAll('.kvi-likes[data-meal-id]').forEach(bar => {
+      this.renderBar(bar.dataset.mealId);
+    });
+  },
+
+  /** Show emoji picker near an element. */
+  showPicker(anchor, mealId) {
+    document.querySelector('.kvi-emoji-picker')?.remove();
+    const picker = document.createElement('div');
+    picker.className = 'kvi-emoji-picker';
+    for (const em of this._emojis) {
+      const opt = document.createElement('span');
+      opt.className = 'kvi-emoji-opt';
+      opt.textContent = em;
+      opt.addEventListener('click', (e) => {
+        e.stopPropagation();
+        this.toggle(mealId, em);
+        picker.remove();
+      });
+      picker.appendChild(opt);
+    }
+    document.body.appendChild(picker);
+    const rect = anchor.getBoundingClientRect();
+    picker.style.left = Math.min(rect.left, window.innerWidth - 200) + 'px';
+    picker.style.top = (rect.bottom + 4) + 'px';
+    // Auto-close
+    setTimeout(() => {
+      const close = (e) => { if (!picker.contains(e.target)) { picker.remove(); document.removeEventListener('pointerdown', close); } };
+      document.addEventListener('pointerdown', close);
+    }, 0);
+  },
+
+  /** Bind click/long-press handlers on a container. */
+  bindEvents(container) {
+    let longPress = null;
+    container.addEventListener('click', (e) => {
+      const btn = e.target.closest('.kvi-like-btn');
+      if (!btn) return;
+      e.stopPropagation();
+      const mid = btn.dataset.mealId;
+      const emoji = btn.dataset.emoji || '👍';
+      if (mid) this.toggle(mid, emoji);
+    });
+    container.addEventListener('pointerdown', (e) => {
+      const btn = e.target.closest('.kvi-like-btn');
+      if (!btn) return;
+      const mid = btn.dataset.mealId;
+      if (!mid) return;
+      longPress = setTimeout(() => { this.showPicker(btn, mid); longPress = null; }, 500);
+    });
+    container.addEventListener('pointerup', () => { if (longPress) { clearTimeout(longPress); longPress = null; } });
+    container.addEventListener('pointercancel', () => { if (longPress) { clearTimeout(longPress); longPress = null; } });
+  },
+};
+
+// Initialize once
+_kantiniLikes.init();
+
+
+/* ══════════════════════════════════════════════════════════════
    Kantini Result Plugin — renders canteen meal cards inline
    ══════════════════════════════════════════════════════════════ */
 
@@ -4922,6 +5065,7 @@ const kantiniResultPlugin = {
     if (dayLabel) html += `<span class="kvi-title">${dayLabel}</span>`;
     html += `${kwDropdown}<span class="kvi-subtitle">${locLabel}</span></div>`;
 
+    const mealIds = [];
     if (noMenu) {
       html += '<div class="kvi-no-menu">Kein Speiseplan für diese Woche verfügbar</div>';
     } else {
@@ -4929,6 +5073,8 @@ const kantiniResultPlugin = {
       for (const m of meals) {
         const n = { kcal: m.kcal, carbs: m.carbs_g, protein: m.protein_g, fat: m.fat_g };
         const tagHtml = (m.tags || []).map(t => _tagIcons[t] ? `<span class="kvi-tag">${_tagIcons[t]}</span>` : '').join('');
+        const mid = _kantiniLikes.mealId(spec, m);
+        mealIds.push(mid);
 
         html += '<div class="kvi-meal">';
         if (m.image_url) {
@@ -4950,12 +5096,28 @@ const kantiniResultPlugin = {
           const pP = Math.round((n.protein / total) * 100);
           html += `<div class="kvi-nutri-bar"><div style="width:${cP}%;background:#f59e0b"></div><div style="width:${pP}%;background:#ef4444"></div><div style="width:${100-cP-pP}%;background:#3b82f6"></div></div>`;
         }
-        html += '</div></div>';
+        html += '</div>';
+        // Likes bar — right side of card
+        html += `<div class="kvi-likes" data-meal-id="${mid}"></div>`;
+        html += '</div>';
       }
       html += '</div>';
     }
     html += '</div>';
     container.innerHTML = html;
+
+    // Click meal images to open lightbox (with copy/download buttons)
+    const app = window.__chatApp;
+    if (app && app._openLightbox) {
+      container.querySelectorAll('.kvi-img img').forEach(img => {
+        img.style.cursor = 'pointer';
+        img.addEventListener('click', () => app._openLightbox(img.src));
+      });
+    }
+
+    // Meal likes — bind click/long-press and fetch initial counts
+    _kantiniLikes.bindEvents(container);
+    if (mealIds && mealIds.length) _kantiniLikes.fetchLikes(mealIds);
 
     // Bind KW dropdown → send message asking for that week
     const select = container.querySelector('.kvi-kw-select');

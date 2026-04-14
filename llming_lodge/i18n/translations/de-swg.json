@@ -54,6 +54,8 @@
   "chat.download": "Runterlade",
   "chat.copied": "Kopiert!",
   "chat.export": "Exportiera",
+  "chat.import": "Importiera",
+  "chat.data_management": "Data",
   "chat.clear_all": "Alle löscha",
   "chat.general_category": "Allgmoi",
   "chat.ctx_history": "Verlauf",

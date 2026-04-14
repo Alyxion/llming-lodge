@@ -61,6 +61,8 @@
   "chat.download": "Herunterladen",
   "chat.copied": "Kopiert!",
   "chat.export": "Exportieren",
+  "chat.import": "Importieren",
+  "chat.data_management": "Daten",
   "chat.clear_all": "Alle löschen",
   "chat.general_category": "Allgemein",
   "chat.ctx_history": "Verlauf",

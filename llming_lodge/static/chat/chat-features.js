@@ -15,8 +15,8 @@ class ChatApp {
   // Central file limits (available before core loads)
   static MAX_TOKEN_BUDGET = 100000;
   static MAX_FILES = 40;
-  static MAX_SINGLE_FILE = 5 * 1024 * 1024;  // 5 MB
-  static MAX_TOTAL_SIZE = 10 * 1024 * 1024;   // 10 MB
+  static MAX_SINGLE_FILE = 10 * 1024 * 1024;  // 10 MB
+  static MAX_TOTAL_SIZE = 50 * 1024 * 1024;   // 50 MB
   static MAX_IMAGE_DIM = 3840;
   static DOC_ICONS = {
     plotly: 'bar_chart', latex: 'functions', table: 'table_chart',

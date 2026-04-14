@@ -61,6 +61,8 @@
   "chat.download": "Télécharger",
   "chat.copied": "Copié !",
   "chat.export": "Exporter",
+  "chat.import": "Importer",
+  "chat.data_management": "Données",
   "chat.clear_all": "Tout effacer",
   "chat.general_category": "Général",
   "chat.ctx_history": "Historique",

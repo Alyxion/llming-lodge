@@ -35,9 +35,9 @@ logger = logging.getLogger(__name__)
 # ── Validation constants (match client-side limits) ──────────────────
 
 MAX_FILES = 40
-MAX_SINGLE_FILE = 5 * 1024 * 1024      # 5 MB
-MAX_TOTAL_SIZE = 10 * 1024 * 1024       # 10 MB
-MAX_ZIP_SIZE = 15 * 1024 * 1024         # 15 MB (ZIP overhead)
+MAX_SINGLE_FILE = 10 * 1024 * 1024     # 10 MB
+MAX_TOTAL_SIZE = 50 * 1024 * 1024      # 50 MB
+MAX_ZIP_SIZE = 60 * 1024 * 1024        # 60 MB (ZIP overhead)
 
 ALLOWED_KNOWLEDGE_EXT = {".pdf", ".docx", ".xlsx", ".txt", ".md", ".csv"}
 ALLOWED_MCP_JS_EXT = {".js", ".mjs"}

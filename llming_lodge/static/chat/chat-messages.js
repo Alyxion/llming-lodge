@@ -436,6 +436,7 @@
     handleModelLocked(msg) {
       // System droplet enforced a model — lock the selector
       this._modelLocked = true;
+      this._allowedModels = null;
       this.currentModel = msg.model;
       this.updateModelButton();
       if (this.el.modelBtn) {
@@ -445,8 +446,22 @@
       }
     },
 
+    handleModelRestricted(msg) {
+      // Droplet allows switching between a set of models
+      this._modelLocked = false;
+      this._allowedModels = new Set(msg.allowed_models || []);
+      this.currentModel = msg.model;
+      this.updateModelButton();
+      if (this.el.modelBtn) {
+        this.el.modelBtn.style.pointerEvents = '';
+        this.el.modelBtn.style.opacity = '';
+        this.el.modelBtn.title = '';
+      }
+    },
+
     handleModelUnlocked() {
       this._modelLocked = false;
+      this._allowedModels = null;
       if (this.el.modelBtn) {
         this.el.modelBtn.style.pointerEvents = '';
         this.el.modelBtn.style.opacity = '';
@@ -1032,6 +1047,11 @@
       console.log('[DEV] Dev mode', this._devMode ? 'enabled' : 'disabled');
     },
 
+    handleKantiniLikesUpdate(msg) {
+      // Dispatch as DOM event so the kantini inline card plugin can react
+      document.dispatchEvent(new CustomEvent('kantini-likes', { detail: msg }));
+    },
+
     _showNotificationDialog(message) {
       const overlay = document.createElement('div');
       overlay.className = 'cv2-dialog-overlay';
@@ -1353,6 +1373,9 @@
       if (this.el.exportAll) {
         this.el.exportAll.innerHTML = `<span class="material-icons">download</span> ${this.t('chat.export')}`;
       }
+      if (this.el.importAll) {
+        this.el.importAll.innerHTML = `<span class="material-icons">upload</span> ${this.t('chat.import') || 'Import'}`;
+      }
       if (this.el.clearAll) {
         this.el.clearAll.innerHTML = `<span class="material-icons">delete_sweep</span> ${this.t('chat.clear_all')}`;
       }
@@ -1552,14 +1575,16 @@
       this.gearMenuOpen = false;
       this.el.gearPopover.classList.remove('cv2-visible');
       this.el.voiceSettingsMenu.style.display = 'none';
+      if (this.el.dataMgmtPopover) this.el.dataMgmtPopover.style.display = 'none';
       const themeSub = document.getElementById('cv2-theme-submenu');
       if (themeSub) themeSub.style.display = 'none';
     },
 
+
     // ── Model Button ──────────────────────────────────────
 
     updateModelButton() {
-      const info = this.models.find(m => m.model === this.currentModel);
+      const info = this.models.find(m => m.model === this.currentModel || m.name === this.currentModel);
       if (!info) {
         this.el.modelBtn.innerHTML = `<span>${this._escHtml(this.currentModel)}</span><span class="material-icons" style="font-size:14px;color:#9ca3af">expand_more</span>`;
         return;
@@ -1572,7 +1597,10 @@
 
       // Update dropdown with comparison bars, sorted by popularity
       const bar = (val) => `<div class="cv2-model-bar"><div class="cv2-model-bar-fill" style="width:${val * 10}%"></div></div>`;
-      const sorted = [...this.models].sort((a, b) => (b.popularity || 0) - (a.popularity || 0));
+      const filtered = this._allowedModels
+        ? this.models.filter(m => this._allowedModels.has(m.model) || this._allowedModels.has(m.name))
+        : this.models;
+      const sorted = [...filtered].sort((a, b) => (b.popularity || 0) - (a.popularity || 0));
 
       this.el.modelDropdown.innerHTML = sorted.map(m => {
         const sel = m.model === this.currentModel;
@@ -1687,6 +1715,7 @@
       'error': 'handleError',
       'model_switched': 'handleModelSwitched',
       'model_locked': 'handleModelLocked',
+      'model_restricted': 'handleModelRestricted',
       'model_unlocked': 'handleModelUnlocked',
       'tools_updated': 'handleToolsUpdated',
       'register_renderers': 'handleRegisterRenderers',
@@ -1707,6 +1736,7 @@
       'action_callback_result': 'handleActionCallbackResult',
       'notification': 'handleNotification',
       'dev_mode': 'handleDevMode',
+      'kantini_likes_update': 'handleKantiniLikesUpdate',
     },
   });
 })();

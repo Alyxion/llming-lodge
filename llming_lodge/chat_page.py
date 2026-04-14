@@ -42,6 +42,7 @@ from llming_lodge.chat_config import (
     ChatAppConfig, ChatUserConfig, ChatFrontendConfig, ThemeConfig,
 )
 from llming_lodge.server import API_PREFIX
+from llming_com.auth import IDENTITY_COOKIE_NAME, get_auth as _auth
 
 logger = logging.getLogger(__name__)
 
@@ -225,7 +226,8 @@ def _build_script_phases() -> tuple[list[str], list[str], str]:
     ]
     features_first = _hashed_url("chat-features.js")
 
-    phase1 = vendor + plugin_foundation + [features_first]
+    llming_com_ws = "/llming-com/llming-ws.js"
+    phase1 = vendor + plugin_foundation + [llming_com_ws, features_first]
 
     codemirror_addons = [
         _hashed_url("vendor/codemirror/javascript.min.js"),
@@ -464,10 +466,8 @@ class ChatPage:
         from starlette.routing import Route
         from starlette.requests import Request
         from starlette.responses import HTMLResponse, Response, RedirectResponse
-        from llming_lodge.server import (
-            verify_auth_cookie,
-            sign_auth_token, SESSION_COOKIE_NAME, AUTH_COOKIE_NAME,
-        )
+        from llming_com.auth import SESSION_COOKIE_NAME, AUTH_COOKIE_NAME
+        _auth_mgr = _auth()
         from llming_lodge.api.chat_session_api import SessionRegistry
 
         page_path = self._page_path
@@ -510,17 +510,27 @@ class ChatPage:
                         app_title = getattr(entry, '_app_title', 'Chat')
 
                         response = HTMLResponse(build_chat_html(config_json, renderers_json, app_title))
+                        _secure = request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https"
                         # Set session cookie so next reload is the fast path
                         response.set_cookie(
                             SESSION_COOKIE_NAME, new_session_id,
                             path="/", max_age=86400, samesite="lax", httponly=True,
                         )
                         # Ensure auth cookie is set
-                        if not verify_auth_cookie(request):
-                            token = sign_auth_token(new_session_id)
+                        if not _auth_mgr.verify_auth_cookie(request):
+                            token = _auth_mgr.sign_auth_token(new_session_id)
                             response.set_cookie(
                                 AUTH_COOKIE_NAME, token,
                                 path="/", max_age=604800, samesite="lax",
+                            )
+                        # Always refresh the identity cookie so other pages
+                        # (hub, globe, mail) can find the tokens in Redis
+                        identity_sid = _auth_mgr.verify_identity_cookie(request)
+                        if identity_sid:
+                            response.set_cookie(
+                                IDENTITY_COOKIE_NAME, _auth_mgr.sign_identity_token(identity_sid),
+                                path="/", max_age=604800, samesite="lax",
+                                secure=_secure, httponly=True,
                             )
                         return response
 
@@ -553,7 +563,7 @@ class ChatPage:
             ``page_path`` can find the session without URL parameters.
             """
             session_id = request.path_params["session_id"]
-            if not verify_auth_cookie(request):
+            if not _auth_mgr.verify_auth_cookie(request):
                 return Response(status_code=401, content="Not authenticated")
 
             registry = SessionRegistry.get()
@@ -660,6 +670,8 @@ class ChatPage:
         controller._budget_limits_for_user = user_config.budget_limits_for_user
         controller._system_nudge_keys = ac.system_nudges
         controller._app_ext_manager = ext_manager
+        if user_config.custom_ws_handlers:
+            controller._custom_ws_handlers = dict(user_config.custom_ws_handlers)
 
         # ── Nudges: master + discoverable ──
         controller._master_prompt = ""
@@ -714,6 +726,28 @@ class ChatPage:
                         user_config.user_email,
                         user_config.user_teams or [],
                     )
+                # Include system nudges in discoverable
+                from llming_lodge.system_nudges import _meta as _sys_nudge_meta
+                for sys_uid, sys_nudge in _sys_nudge_meta.items():
+                    # Filter by email patterns
+                    patterns = sys_nudge.get("email_patterns", [])
+                    if patterns:
+                        email = user_config.user_email or ""
+                        import fnmatch
+                        if not any(fnmatch.fnmatch(email.lower(), p.lower()) for p in patterns):
+                            continue
+                    # Only include if it has server_mcp or auto_activate_keywords
+                    caps = sys_nudge.get("capabilities") or {}
+                    if caps.get("server_mcp") or sys_nudge.get("auto_activate_keywords"):
+                        discoverable.append({
+                            "uid": sys_uid,
+                            "name": sys_nudge.get("name", sys_uid),
+                            "auto_discover_when": sys_nudge.get("description", ""),
+                            "files": [],
+                            "_system_nudge": True,
+                            "_has_server_mcp": bool(caps.get("server_mcp")),
+                        })
+
                 if discoverable:
                     catalog_lines: list[str] = []
                     uid_set: set[str] = set()
@@ -728,6 +762,9 @@ class ChatPage:
                             (f.get("name", "").endswith(".js") or f.get("name", "").endswith(".mjs"))
                             for f in nudge.get("files", [])
                         )
+                        # System nudges with server_mcp are also MCP-activated
+                        if nudge.get("_has_server_mcp"):
+                            has_js_files = True
                         if has_js_files:
                             tool_names = nudge.get("mcp_tool_names", [])
                             tool_count = nudge.get("mcp_tool_count", len(tool_names))

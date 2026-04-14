@@ -272,7 +272,7 @@
               'info'
             );
           } else {
-            return this.t('chat.error_file_too_large', { name: f.name, max: '5 MB' });
+            return this.t('chat.error_file_too_large', { name: f.name, max: '10 MB' });
           }
         }
         newTotalSize += f.size;
@@ -283,7 +283,7 @@
         return sum + (f.size > ChatApp.MAX_SINGLE_FILE && _EXTRACTABLE_EXTS.has(ext) ? 0 : f.size);
       }, stats.totalSize);
       if (nonExtractableSize > ChatApp.MAX_TOTAL_SIZE) {
-        return this.t('chat.error_total_size', { max: '10 MB' });
+        return this.t('chat.error_total_size', { max: '50 MB' });
       }
       return null;
     },

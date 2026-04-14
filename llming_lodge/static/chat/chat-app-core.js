@@ -527,11 +527,20 @@ Object.assign(ChatApp.prototype, {
                 <span class="material-icons">tune</span> ${this.t('chat.voice_settings')}
                 <span class="material-icons cv2-gear-arrow">chevron_right</span>
               </button>
-              <button class="cv2-gear-popover-item" id="cv2-export-all">
-                <span class="material-icons">download</span> ${this.t('chat.export')}
+              <button class="cv2-gear-popover-item" id="cv2-data-mgmt-btn">
+                <span class="material-icons">swap_vert</span> Import / Export
+                <span class="material-icons cv2-gear-arrow">chevron_right</span>
               </button>
               <button class="cv2-gear-popover-item cv2-danger" id="cv2-clear-all">
                 <span class="material-icons">delete_sweep</span> ${this.t('chat.clear_all')}
+              </button>
+            </div>
+            <div class="cv2-gear-submenu" id="cv2-data-mgmt-popover" style="display:none">
+              <button class="cv2-gear-popover-item" id="cv2-export-all">
+                <span class="material-icons">download</span> ${this.t('chat.export')}
+              </button>
+              <button class="cv2-gear-popover-item" id="cv2-import-all">
+                <span class="material-icons">upload</span> ${this.t('chat.import') || 'Import'}
               </button>
             </div>
             <div class="cv2-gear-popover" id="cv2-dev-settings-popover">
@@ -1095,7 +1104,10 @@ Object.assign(ChatApp.prototype, {
       gearBtn: root.querySelector('#cv2-gear-btn'),
       gearPopover: root.querySelector('#cv2-gear-popover'),
       gearThemeSlot: root.querySelector('#cv2-gear-theme-slot'),
+      dataMgmtBtn: root.querySelector('#cv2-data-mgmt-btn'),
+      dataMgmtPopover: root.querySelector('#cv2-data-mgmt-popover'),
       exportAll: root.querySelector('#cv2-export-all'),
+      importAll: root.querySelector('#cv2-import-all'),
       clearAll: root.querySelector('#cv2-clear-all'),
       avatar: root.querySelector('#cv2-sidebar-avatar'),
       devMenu: root.querySelector('#cv2-dev-menu'),
@@ -1573,10 +1585,30 @@ Object.assign(ChatApp.prototype, {
     // Theme selector (inside gear menu)
     this._renderThemeSelector();
 
-    // Export all (inside gear menu)
+    // Data management submenu — same pattern as voice settings
+    this.el.dataMgmtBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const menu = this.el.dataMgmtPopover;
+      const opening = menu.style.display === 'none';
+      // Close other submenus
+      this.el.voiceSettingsMenu.style.display = 'none';
+      const themeSub = document.getElementById('cv2-theme-submenu');
+      if (themeSub) themeSub.style.display = 'none';
+      menu.style.display = opening ? '' : 'none';
+      if (opening) {
+        const rect = this.el.dataMgmtBtn.getBoundingClientRect();
+        menu.style.left = rect.right + 4 + 'px';
+        menu.style.bottom = (window.innerHeight - rect.bottom) + 'px';
+      }
+    });
+    this.el.dataMgmtPopover.addEventListener('click', (e) => e.stopPropagation());
     this.el.exportAll.addEventListener('click', () => {
       this._closeGearMenu();
       this._exportAll();
+    });
+    this.el.importAll.addEventListener('click', () => {
+      this._closeGearMenu();
+      this._importAll();
     });
 
     // Speech toggle (inside gear menu)

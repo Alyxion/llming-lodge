@@ -893,6 +893,36 @@
         this._selectConversation(card.dataset.id);
       });
     });
+    overlay.querySelectorAll('.cv2-pv-card-delete').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const convId = btn.dataset.id;
+        const card = btn.closest('.cv2-pv-card');
+        // Remove card from DOM immediately
+        if (card) card.remove();
+        // Update count label
+        const countEl = overlay.querySelector('[data-section="chats"] .cv2-pv-count');
+        const remaining = overlay.querySelectorAll('.cv2-pv-card').length;
+        if (countEl) countEl.textContent = remaining;
+        // Show empty state if no cards left
+        if (remaining === 0) {
+          const cardsContainer = overlay.querySelector('.cv2-pv-cards');
+          if (cardsContainer) cardsContainer.outerHTML = '<div class="cv2-pv-empty">No conversations yet — type below to start one.</div>';
+        }
+        // Delete from IDB in background
+        delete this._savedFileRefs[convId];
+        this.idb.delete(convId).then(() => {
+          this.idb.removeAllRefsForConversation(convId).catch(() => {});
+          if (this.activeConvId === convId) {
+            this.activeConvId = '';
+            this._blockDataStore?.clear();
+            try { localStorage.removeItem('cv2-active-conversation'); } catch (_) {}
+          }
+          // Refresh sidebar conversation list (but don't touch project view)
+          this.refreshConversations();
+        });
+      });
+    });
   },
 
   _closeProjectView() {
@@ -913,6 +943,9 @@
         <div class="cv2-pv-card-title">${title}</div>
         ${conv.favorited ? '<span class="material-icons cv2-pv-card-star">star</span>' : ''}
         ${date ? `<div class="cv2-pv-card-date">${date}</div>` : ''}
+        <button class="cv2-pv-card-delete" data-id="${this._escAttr(conv.id)}" title="${this.t('chat.delete') || 'Delete'}">
+          <span class="material-icons" style="font-size:16px">delete</span>
+        </button>
       </div>`;
   },
 
@@ -948,17 +981,152 @@
 
   async _exportAll() {
     try {
-      const allConvs = await this.idb.getAll();
-      // Simple JSON export
-      const blob = new Blob([JSON.stringify(allConvs, null, 2)], { type: 'application/json' });
+      // Dump ALL IndexedDB stores for complete backup
+      const db = this.idb.db;
+      const storeNames = ['conversations', 'conv_meta', 'documents', 'files', 'presets', 'favorites'];
+      const backup = { _version: 2, _exported: new Date().toISOString(), _stores: {} };
+      for (const name of storeNames) {
+        if (!db.objectStoreNames.contains(name)) continue;
+        const tx = db.transaction(name, 'readonly');
+        const store = tx.objectStore(name);
+        const all = await new Promise((res, rej) => {
+          const req = store.getAll();
+          req.onsuccess = () => res(req.result);
+          req.onerror = () => rej(req.error);
+        });
+        backup._stores[name] = all;
+      }
+      const json = JSON.stringify(backup);
+      const blob = new Blob([json], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `conversations_${new Date().toISOString().split('T')[0]}.json`;
+      a.download = `chat-backup_${new Date().toISOString().split('T')[0]}.json`;
       a.click();
       URL.revokeObjectURL(url);
+      console.log('[Export] Complete:', Object.entries(backup._stores).map(([k, v]) => `${k}: ${v.length}`).join(', '));
     } catch (err) {
       console.error('[Export] Failed:', err);
+    }
+  },
+
+  async _importAll() {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = '.json';
+    input.addEventListener('change', async () => {
+      const file = input.files?.[0];
+      if (!file) return;
+      try {
+        const text = await file.text();
+        const data = JSON.parse(text);
+        let stats;
+        if (data._version >= 2 && data._stores) {
+          stats = await this._importV2(data);
+        } else if (Array.isArray(data)) {
+          // Legacy v1: plain array of conversations
+          stats = await this._importV1(data);
+        } else {
+          console.warn('[Import] Unknown format');
+          return;
+        }
+        console.log('[Import] Done:', stats);
+        // Refresh sidebar
+        await this.refreshConversations();
+        this._showImportResult(stats);
+      } catch (err) {
+        console.error('[Import] Failed:', err);
+      }
+    });
+    input.click();
+  },
+
+  /** Import v2 format (full backup with all stores). */
+  async _importV2(data) {
+    const db = this.idb.db;
+    const stats = { added: 0, updated: 0, skipped: 0 };
+    for (const [storeName, records] of Object.entries(data._stores)) {
+      if (!db.objectStoreNames.contains(storeName) || !records?.length) continue;
+      // Determine key path for this store
+      const tx = db.transaction(storeName, 'readwrite');
+      const store = tx.objectStore(storeName);
+      const keyPath = store.keyPath;
+      for (const record of records) {
+        const key = record[keyPath];
+        if (!key) continue;
+        // Check existing
+        const existing = await new Promise((res) => {
+          const req = store.get(key);
+          req.onsuccess = () => res(req.result);
+          req.onerror = () => res(null);
+        });
+        if (existing) {
+          // Compare by updated_at — newer wins
+          const existingTime = existing.updated_at || existing.created_at || '';
+          const importTime = record.updated_at || record.created_at || '';
+          if (importTime > existingTime) {
+            store.put(record);
+            stats.updated++;
+          } else {
+            stats.skipped++;
+          }
+        } else {
+          store.put(record);
+          stats.added++;
+        }
+      }
+      await new Promise((res, rej) => { tx.oncomplete = res; tx.onerror = rej; });
+    }
+    // Rebuild conv_meta from conversations (in case it was stale)
+    if (data._stores.conversations) {
+      const tx = db.transaction(['conversations', 'conv_meta'], 'readwrite');
+      const convStore = tx.objectStore('conversations');
+      const metaStore = tx.objectStore('conv_meta');
+      const all = await new Promise((res) => {
+        const req = convStore.getAll();
+        req.onsuccess = () => res(req.result);
+        req.onerror = () => res([]);
+      });
+      for (const conv of all) {
+        metaStore.put(IDBStore._extractMeta(conv));
+      }
+      await new Promise((res) => { tx.oncomplete = res; });
+    }
+    return stats;
+  },
+
+  /** Import legacy v1 format (plain conversation array). */
+  async _importV1(convs) {
+    const stats = { added: 0, updated: 0, skipped: 0 };
+    for (const conv of convs) {
+      if (!conv.id) continue;
+      const existing = await this.idb.get(conv.id);
+      if (existing) {
+        const existingTime = existing.updated_at || existing.created_at || '';
+        const importTime = conv.updated_at || conv.created_at || '';
+        if (importTime > existingTime) {
+          await this.idb.put(conv);
+          stats.updated++;
+        } else {
+          stats.skipped++;
+        }
+      } else {
+        await this.idb.put(conv);
+        stats.added++;
+      }
+    }
+    return stats;
+  },
+
+  _showImportResult(stats) {
+    const total = stats.added + stats.updated;
+    const msg = total > 0
+      ? `Import complete: ${stats.added} added, ${stats.updated} updated, ${stats.skipped} unchanged.`
+      : `Nothing to import — all ${stats.skipped} items are already up to date.`;
+    if (this._showNotificationDialog) {
+      this._showNotificationDialog(msg);
+    } else {
+      console.log('[Import]', msg);
     }
   },
 

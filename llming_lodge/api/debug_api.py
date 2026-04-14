@@ -383,26 +383,36 @@ def build_debug_router(*, nudge_store=None) -> APIRouter:
                 except Exception:
                     pass
             if intercept_result is not None:
-                from llming_lodge.chat_controller import llm_manager
-                model_info = llm_manager.get_model_info(ctrl.model)
-                await ctrl._send({
-                    "type": "response_started",
-                    "model": ctrl.model,
-                    "model_icon": model_info.model_icon if model_info else "",
-                    "model_label": model_info.label if model_info else ctrl.model,
-                })
-                await ctrl._send({"type": "text_chunk", "content": intercept_result})
-                await ctrl._send({"type": "response_completed"})
-                await ctrl._send({
-                    "type": "tools_updated",
-                    "tools": ctrl.get_all_known_tools(),
-                })
-                return {
-                    "status": "intercepted",
-                    "session_id": session_id,
-                    "text": req.text,
-                    "response": intercept_result,
-                }
+                from llming_lodge.api.chat_session_api import setup_hybrid_intercept
+                if setup_hybrid_intercept(ctrl, intercept_result):
+                    pass  # Hybrid: fall through to LLM send below
+                else:
+                    # Pure intercept — no LLM follow-up
+                    from llming_lodge.chat_controller import llm_manager
+                    from llming_models.llm_base_models import ChatMessage, Role
+                    ctrl.session.history.add_message(
+                        ChatMessage(role=Role.USER, content=req.text))
+                    ctrl.session.history.add_message(
+                        ChatMessage(role=Role.ASSISTANT, content=intercept_result))
+                    model_info = llm_manager.get_model_info(ctrl.model)
+                    await ctrl._send({
+                        "type": "response_started",
+                        "model": ctrl.model,
+                        "model_icon": model_info.model_icon if model_info else "",
+                        "model_label": model_info.label if model_info else ctrl.model,
+                    })
+                    await ctrl._send({"type": "text_chunk", "content": intercept_result})
+                    await ctrl._send({"type": "response_completed", "intercept": True, "full_text": intercept_result})
+                    await ctrl._send({
+                        "type": "tools_updated",
+                        "tools": ctrl.get_all_known_tools(),
+                    })
+                    return {
+                        "status": "intercepted",
+                        "session_id": session_id,
+                        "text": req.text,
+                        "response": intercept_result,
+                    }
 
         # Fire and forget — the response streams via WS to the browser
         task = asyncio.create_task(ctrl.send_message(req.text, images=req.images))

@@ -78,6 +78,92 @@ async def _ensure_api_keys_indexes(coll):
         logger.warning("[API_KEYS] Index creation failed: %s", e)
 
 
+# ── Hybrid Intercept System ───────────────────────────────────────
+#
+# The hybrid intercept pattern allows plugins to render visual content
+# (cards, charts, etc.) BEFORE the LLM responds, then let the LLM add
+# a natural follow-up comment with full context.
+#
+# How it works:
+#   1. An ``on_message_intercept`` handler returns a string containing:
+#      - A fenced code block (e.g. ```kantini_result\n{...}\n```)
+#      - Followed by a text summary after the closing ```
+#   2. ``setup_hybrid_intercept()`` splits these two parts.
+#   3. The fenced block is stored as ``controller._intercept_prefix``
+#      and sent to the client as the first ``text_chunk`` before the
+#      LLM streams (renders visual cards immediately).
+#   4. The text summary is injected into the context preamble so the
+#      LLM has knowledge of the data for its follow-up comment.
+#   5. After the LLM response completes, the preamble is restored.
+#   6. The prefix is prepended to the assistant message in history
+#      so it persists in IndexedDB and renders on conversation restore.
+#
+# To create a new hybrid intercept plugin:
+#   - Write an ``async intercept_message(text, controller)`` handler
+#   - Return ``"{fenced_block}\n\n{text_summary}"`` for hybrid mode
+#   - Return a plain string (no fenced block) for pure intercept
+#   - Return ``None`` to skip (no interception)
+#   - Optionally set ``controller._intercept_preamble`` to a custom
+#     LLM instruction string before returning
+#   - Register via ``ChatUserConfig(on_message_intercept=handler)``
+# ──────────────────────────────────────────────────────────────────
+
+_DEFAULT_INTERCEPT_PREAMBLE = (
+    "[CONTEXT — visual content cards are ALREADY displayed above your response. "
+    "The user can see all details in the cards. "
+    "Your ONLY job: write 1-2 SHORT friendly sentences (max 30 words). "
+    "NEVER repeat content from the cards. "
+    "NEVER output JSON, code blocks, or markdown tables.]"
+)
+
+
+def setup_hybrid_intercept(controller, intercept_result: str,
+                           preamble: str | None = None) -> bool:
+    """Detect and configure hybrid intercept mode on the controller.
+
+    Checks if ``intercept_result`` contains a fenced code block followed
+    by a text summary.  If so, configures the controller for hybrid mode:
+    the fenced block renders as visual content immediately, and the LLM
+    adds a short follow-up with the summary as context.
+
+    The preamble (instruction to the LLM) is resolved in priority order:
+      1. Explicit ``preamble`` argument
+      2. ``controller._intercept_preamble`` (set by the intercept handler)
+      3. ``_DEFAULT_INTERCEPT_PREAMBLE`` fallback
+
+    Args:
+        controller: The WebSocketChatController instance.
+        intercept_result: Full result from the intercept handler.
+            Must contain ``\\n```\\n`` to trigger hybrid mode.
+        preamble: Optional custom LLM instruction. If provided, takes
+            precedence over ``controller._intercept_preamble``.
+
+    Returns:
+        ``True`` if hybrid mode was set up (caller should fall through
+        to the normal LLM send path).
+        ``False`` if no fenced block was found (caller should handle
+        as a pure intercept — no LLM follow-up).
+    """
+    _fence_end = intercept_result.find("\n```\n")
+    _has_summary = _fence_end > 0 and len(intercept_result) > _fence_end + 5
+    if _has_summary:
+        fenced_block = intercept_result[:_fence_end + 4]
+        summary = intercept_result[_fence_end + 4:].strip()
+        controller._intercept_prefix = fenced_block + "\n\n"
+        # Use preamble from: explicit arg > controller attr (set by intercept handler) > default
+        _preamble = preamble or getattr(controller, '_intercept_preamble', None) or _DEFAULT_INTERCEPT_PREAMBLE
+        if hasattr(controller, '_intercept_preamble'):
+            del controller._intercept_preamble
+        _old_preamble = controller.context_preamble or ""
+        controller.context_preamble = (
+            _old_preamble + f"\n\n{_preamble}\n{summary}"
+        )
+        controller.session._context_preamble = controller.context_preamble
+        controller._restore_preamble = _old_preamble
+        return True
+    return False
+
+
 # ── Remote tasks collection helper ──────────────────────────────────
 
 _remote_tasks_coll_cache = None
@@ -750,24 +836,47 @@ async def _activate_server_mcp(controller: "WebSocketChatController", nudge: dic
 
     await _register_mcp_tools(controller, mcp_config)
 
-    # Enforce Opus for system droplets — complex tool calling needs the best model.
-    # Save user's current preference so it's restored on new chat.
-    enforced_model = caps.get("enforced_model", "claude-opus-4-6")
+    # Model selection for droplets — switch to the default model and optionally
+    # restrict the model selector to a set of allowed models.
+    enforced_model = caps.get("enforced_model", "claude_opus")
+    allowed_models = caps.get("allowed_models")  # None = locked to enforced_model
     try:
-        # Save user preference before overriding
         controller._saved_model_pref = "@auto" if controller._auto_select else controller.model
-        await controller.switch_model(enforced_model, _force=True)
-        # Lock the model — prevent user from changing it
-        controller._model_locked = True
-        controller._model_locked_reason = nudge.get("name", "System Droplet")
-        # Notify frontend to lock the model selector
-        await controller._send({
-            "type": "model_locked",
-            "model": enforced_model,
-            "reason": controller._model_locked_reason,
-        })
-        logger.info("[SERVER_MCP] Enforced model %s for droplet '%s'",
-                    enforced_model, nudge.get("name", ""))
+        controller._saved_auto_select = controller._auto_select
+        controller._auto_select = False
+        await controller._silent_switch_model(enforced_model)
+        # Use the resolved model name (deployment name), not the bare name
+        resolved_model = controller.model
+
+        if allowed_models:
+            # Resolve bare names to actual model/deployment names
+            resolved_allowed = []
+            for m in allowed_models:
+                try:
+                    info = llm_manager.get_model_info(m)
+                    resolved_allowed.append(info.model)
+                except ValueError:
+                    resolved_allowed.append(m)
+            controller._model_locked = False
+            controller._model_locked_reason = ""
+            await controller._send({
+                "type": "model_restricted",
+                "model": resolved_model,
+                "allowed_models": resolved_allowed,
+                "reason": nudge.get("name", "System Droplet"),
+            })
+            logger.info("[SERVER_MCP] Model %s (allowed: %s) for droplet '%s'",
+                        resolved_model, resolved_allowed, nudge.get("name", ""))
+        else:
+            controller._model_locked = True
+            controller._model_locked_reason = nudge.get("name", "System Droplet")
+            await controller._send({
+                "type": "model_locked",
+                "model": resolved_model,
+                "reason": controller._model_locked_reason,
+            })
+            logger.info("[SERVER_MCP] Enforced model %s for droplet '%s'",
+                        resolved_model, nudge.get("name", ""))
     except Exception as ex:
         logger.warning("[SERVER_MCP] Could not enforce model %s: %s", enforced_model, ex)
 
@@ -794,6 +903,19 @@ async def _activate_server_mcp(controller: "WebSocketChatController", nudge: dic
             "type": "tools_updated",
             "tools": controller.get_all_known_tools(),
         })
+
+    # Register client-side renderers (e.g. flux source footer for PDF/table previews)
+    try:
+        client_renderers = await server_instance.get_client_renderers()
+        if client_renderers and controller._ws:
+            await controller._send({
+                "type": "register_renderers",
+                "renderers": client_renderers,
+            })
+            logger.info("[SERVER_MCP] Registered %d client renderer(s) for '%s'",
+                        len(client_renderers), nudge_name)
+    except Exception as ex:
+        logger.warning("[SERVER_MCP] Failed to get client renderers for '%s': %s", nudge_name, ex)
 
     logger.info("[SERVER_MCP] Activated '%s' with %d tools", nudge_name, len(tools))
     return f"Activated server MCP '{nudge_name}' with {len(tools)} tools"
@@ -1006,6 +1128,8 @@ class WebSocketChatController(ChatController):
         self._message_tool_calls: dict[int, list[dict]] = {}
         # Maps message object id() -> avatar override dict (for MCP custom avatars)
         self._message_avatar_overrides: dict[int, dict] = {}
+        # Maps message object id() -> display text (interim narration stripped)
+        self._message_display_text: dict[int, str] = {}
 
     def get_all_known_tools(self) -> List[dict]:
         """Override to translate built-in tool names and categories.
@@ -1085,6 +1209,19 @@ class WebSocketChatController(ChatController):
             msg["auto_icon"] = "models/auto-select.svg"
             msg["model_label"] = f"Auto ({msg['model_label']})"
         asyncio.create_task(self._send(msg))
+        # ── Hybrid intercept: inject visual card before LLM streams ──
+        # If setup_hybrid_intercept() set _intercept_prefix, send it as
+        # the first text_chunk so the frontend renders the card immediately.
+        # The prefix is also prepended to _text_content so it's included
+        # in full_text when the LLM finishes (for client-side persistence).
+        # _used_intercept_prefix is saved for _on_response_completed to
+        # prepend the prefix to the server-side history message too.
+        prefix = getattr(self, '_intercept_prefix', None)
+        if prefix:
+            self._intercept_prefix = None
+            self._used_intercept_prefix = prefix
+            self._text_content = prefix
+            asyncio.create_task(self._send({"type": "text_chunk", "content": prefix}))
 
     _SENTENCE_BREAK = re.compile(r'[.!?]\s')
     _LONG_BREAK = re.compile(r'[,;:–]\s')
@@ -1099,6 +1236,21 @@ class WebSocketChatController(ChatController):
         return text.count('```') % 2 != 0
 
     def _on_text_chunk(self, content: str) -> None:
+        # Insert line break when text resumes after a tool call so segments
+        # are visually separated during streaming.
+        if getattr(self, '_had_tool_since_text', False):
+            self._had_tool_since_text = False
+            # Archive previous segment as interim
+            if not hasattr(self, '_interim_text_segments'):
+                self._interim_text_segments = []
+            prev = getattr(self, '_current_text_segment', '')
+            if prev.strip():
+                self._interim_text_segments.append(prev.strip())
+            self._current_text_segment = ''
+            content = "\n" + content
+        if not hasattr(self, '_current_text_segment'):
+            self._current_text_segment = ''
+        self._current_text_segment += content
         asyncio.create_task(self._send({
             "type": "text_chunk",
             "content": content,
@@ -1126,6 +1278,8 @@ class WebSocketChatController(ChatController):
             self._schedule_tts_flush_timer()
 
     def _on_tool_event(self, tool_call: ToolCallInfo) -> None:
+        self._had_tool_since_text = True
+        self._tool_text_segment_idx = getattr(self, '_tool_text_segment_idx', 0) + 1
         result = tool_call.result if tool_call.status == ToolCallStatus.COMPLETED else None
 
         # Detect rich MCP envelope in in-process tool results
@@ -1202,16 +1356,21 @@ class WebSocketChatController(ChatController):
                     # client via doc_created (prevents duplicate rendering).
                     already_notified = bool(parsed_res.get("document_id"))
 
+                    block = dict(doc_data)
+                    block["id"] = doc_id
+                    block["name"] = doc_name
                     if not already_notified:
-                        # Queue fenced code block for inline rendering
-                        block = dict(doc_data)
-                        block["id"] = doc_id
-                        block["name"] = doc_name
+                        # Queue for both live injection (full_text) and persistence
                         self._pending_doc_blocks.append((doc_type, block))
                         logger.info("[TOOL_RESULT] Queued inline doc type=%s id=%s for injection",
                                     doc_type, doc_id)
                     else:
-                        logger.info("[TOOL_RESULT] Skipping fenced block for type=%s id=%s (doc_store already notified client)",
+                        # Already rendered live — queue ONLY for serialization
+                        # (not in _pending_doc_blocks which appends to full_text)
+                        if not hasattr(self, '_persist_only_doc_blocks'):
+                            self._persist_only_doc_blocks = []
+                        self._persist_only_doc_blocks.append((doc_type, block))
+                        logger.info("[TOOL_RESULT] Queued doc type=%s id=%s for persistence only",
                                     doc_type, doc_id)
 
                     # Strip bulky __inline_doc__ from WS event but keep
@@ -1264,11 +1423,18 @@ class WebSocketChatController(ChatController):
             except (json.JSONDecodeError, TypeError, AttributeError, KeyError):
                 pass
 
+        # Resolve display name from tool registry (honors MCP displayName)
+        # rather than the ToolCallInfo fallback (snake_case → Title Case).
+        display_name = tool_call.display_name
+        tool_def = get_default_registry().get(tool_call.name)
+        if tool_def:
+            display_name = tool_def.get_display_name()
+
         tool_event = {
             "type": "tool_event",
             "name": tool_call.name,
             "call_id": tool_call.call_id,
-            "display_name": tool_call.display_name,
+            "display_name": display_name,
             "status": tool_call.status.value if hasattr(tool_call.status, "value") else str(tool_call.status),
             "is_image_generation": tool_call.is_image_generation,
             "result": result,
@@ -1286,6 +1452,54 @@ class WebSocketChatController(ChatController):
         }))
 
     def _on_response_completed(self, full_text: str) -> None:
+        # ── Strip interim narration from visible text ────────────
+        # The server history keeps the full text (useful for follow-up context).
+        # The frontend gets a clean version with only the final answer.
+        interim_segments = getattr(self, '_interim_text_segments', [])
+        display_text = full_text
+        if interim_segments:
+            for seg in interim_segments:
+                display_text = display_text.replace(seg, '', 1)
+            display_text = display_text.lstrip()
+            self._interim_text_segments = []
+            # Track display_text for serialization — the history keeps full text
+            # (with interim) for LLM context, but IDB stores display_text
+            try:
+                if self.session.history.messages:
+                    last_msg = self.session.history.messages[-1]
+                    if last_msg.role == Role.ASSISTANT:
+                        self._message_display_text[id(last_msg)] = display_text
+            except Exception:
+                pass
+        self._current_text_segment = ''
+        self._tool_text_segment_idx = 0
+        self._had_tool_since_text = False
+        # Use display_text for the frontend
+        full_text = display_text
+
+        # ── Hybrid intercept cleanup ─────────────────────────────
+        # 1. Restore the context preamble to its pre-intercept state
+        #    (the summary was only needed for this one LLM turn).
+        _restore = getattr(self, '_restore_preamble', None)
+        if _restore is not None:
+            self.context_preamble = _restore
+            self.session._context_preamble = _restore
+            self._restore_preamble = None
+        # 2. Prepend the visual card (fenced block) to the assistant
+        #    message in server-side history.  The LLM only generated
+        #    the follow-up text, but the stored message must contain
+        #    BOTH so that _serialize_messages() → save_conversation →
+        #    IndexedDB has the full content for conversation restore.
+        _prefix = getattr(self, '_used_intercept_prefix', None)
+        if _prefix:
+            self._used_intercept_prefix = None
+            try:
+                if self.session.history.messages:
+                    last_msg = self.session.history.messages[-1]
+                    if last_msg.role == Role.ASSISTANT:
+                        last_msg.content = _prefix + (last_msg.content or "")
+            except Exception as e:
+                logger.warning("[INTERCEPT] Failed to prepend prefix to history: %s", e)
         logger.info("[RESP_DONE] full_text=%d chars, pending_rich_mcp=%d blocks",
                      len(full_text), len(self._pending_rich_mcp_blocks))
         # Append rich MCP fenced code blocks to the WS payload for client rendering,
@@ -1331,6 +1545,20 @@ class WebSocketChatController(ChatController):
             except Exception as e:
                 logger.warning("[DOC_BLOCKS] Failed to track for serialization: %s", e)
 
+        # Track persist-only doc blocks (already rendered live, need serialization only)
+        persist_only = getattr(self, '_persist_only_doc_blocks', None)
+        if persist_only:
+            all_doc_blocks = list(persist_only)
+            self._persist_only_doc_blocks.clear()
+            try:
+                if self.session.history.messages:
+                    last_msg = self.session.history.messages[-1]
+                    if last_msg.role == Role.ASSISTANT:
+                        existing = self._message_doc_blocks.get(id(last_msg), [])
+                        self._message_doc_blocks[id(last_msg)] = existing + all_doc_blocks
+            except Exception as e:
+                logger.warning("[DOC_BLOCKS] Failed to track persist-only blocks: %s", e)
+
         # Process generated image
         generated_image = None
         if self._generated_image_base64:
@@ -1347,11 +1575,17 @@ class WebSocketChatController(ChatController):
                 logger.warning(f"[HISTORY] Failed to update message with generated image: {e}")
 
         tool_calls_data = []
+        registry = get_default_registry()
         for tc in self._tool_calls:
+            # Resolve display name from registry (honors MCP displayName)
+            dn = tc.display_name
+            td = registry.get(tc.name)
+            if td:
+                dn = td.get_display_name()
             tc_data = {
                 "name": tc.name,
                 "call_id": tc.call_id,
-                "display_name": tc.display_name,
+                "display_name": dn,
                 "status": tc.status.value if hasattr(tc.status, "value") else str(tc.status),
                 "is_image_generation": tc.is_image_generation,
             }
@@ -1479,25 +1713,22 @@ class WebSocketChatController(ChatController):
             pass
 
     def _get_speech_service(self):
-        """Lazy-init SpeechService."""
+        """Lazy-init OpenAIMediaProvider from llming-models."""
         if not self._speech_service:
-            from llming_lodge.speech_service import SpeechService
-            svc = SpeechService()
+            from llming_models.media import OpenAIMediaProvider
+            svc = OpenAIMediaProvider()
             if self._tts_model:
-                svc.TTS_MODEL = self._tts_model
-            if self._tts_default_voice:
-                svc.TTS_DEFAULT_VOICE = self._tts_default_voice
+                svc.tts_model = self._tts_model
             self._speech_service = svc
         return self._speech_service
 
     @staticmethod
     def _get_tts_voices():
-        from llming_lodge.speech_service import TTS_VOICES
-        return TTS_VOICES
+        from llming_models.media import OpenAIMediaProvider
+        return [(v.id, v.name, v.gender) for v in OpenAIMediaProvider.VOICES]
 
     def _get_speech_service_default_voice(self) -> str:
-        from llming_lodge.speech_service import SpeechService
-        return self._tts_default_voice or SpeechService.TTS_DEFAULT_VOICE
+        return self._tts_default_voice or "cedar"
 
     async def _auto_tts(self, text: str) -> None:
         """Synthesize TTS for the completed response and send to client (legacy single-shot)."""
@@ -1506,8 +1737,9 @@ class WebSocketChatController(ChatController):
             if not text:
                 return
             service = self._get_speech_service()
-            mp3_bytes, word_timings = await service.synthesize(text, locale=self._locale, voice=self._tts_voice)
-            audio_b64 = base64.b64encode(mp3_bytes).decode("ascii")
+            result = await service.synthesize(text, voice=self._tts_voice or "nova", language=self._locale, with_timings=True)
+            audio_b64 = base64.b64encode(result.audio_bytes).decode("ascii")
+            word_timings = [{"word": w.text, "start": w.start, "end": w.end} for w in result.word_timings]
             await self._send({
                 "type": "tts_audio",
                 "audio_b64": audio_b64,
@@ -1613,7 +1845,8 @@ class WebSocketChatController(ChatController):
                 return
             service = self._get_speech_service()
             logger.info(f"[TTS] Synthesizing segment {segment} ({len(text)} chars)")
-            mp3_bytes = await service.synthesize_fast(text, locale=self._locale, voice=self._tts_voice)
+            result = await service.synthesize(text, voice=self._tts_voice or "nova", language=self._locale)
+            mp3_bytes = result.audio_bytes
             audio_b64 = base64.b64encode(mp3_bytes).decode("ascii")
             await self._send({
                 "type": "tts_audio",
@@ -1675,7 +1908,43 @@ class WebSocketChatController(ChatController):
             logger.debug(f"[TITLE] Background title generation failed: {e}")
 
     def _on_response_cancelled(self) -> None:
+        # Persist any rich_mcp blocks that were received before cancellation
+        if self._pending_rich_mcp_blocks:
+            blocks = list(self._pending_rich_mcp_blocks)
+            for entry in blocks:
+                block_json = json.dumps(entry, ensure_ascii=False)
+                self._text_content += f"\n\n```rich_mcp\n{block_json}\n```"
+            self._pending_rich_mcp_blocks.clear()
+            try:
+                if self.session.history.messages:
+                    last_msg = self.session.history.messages[-1]
+                    if last_msg.role == Role.ASSISTANT:
+                        self._message_rich_mcp[id(last_msg)] = blocks
+            except Exception:
+                pass
+        # Same for pending doc blocks
+        if self._pending_doc_blocks:
+            doc_blocks = list(self._pending_doc_blocks)
+            for doc_type, block_data in doc_blocks:
+                block_json = json.dumps(block_data, ensure_ascii=False)
+                self._text_content += f"\n\n```{doc_type}\n{block_json}\n```"
+            self._pending_doc_blocks.clear()
+            try:
+                if self.session.history.messages:
+                    last_msg = self.session.history.messages[-1]
+                    if last_msg.role == Role.ASSISTANT:
+                        self._message_doc_blocks[id(last_msg)] = doc_blocks
+            except Exception:
+                pass
+        # Restore preamble if intercept was active
+        _restore = getattr(self, '_restore_preamble', None)
+        if _restore is not None:
+            self.context_preamble = _restore
+            self.session._context_preamble = _restore
+            self._restore_preamble = None
         asyncio.create_task(self._send({"type": "response_cancelled"}))
+        # Save the partial conversation so charts/blocks survive reload
+        asyncio.create_task(self._post_response_tasks())
 
     def _on_error(self, error: Exception) -> None:
         error_type = type(error).__name__
@@ -1994,6 +2263,10 @@ class WebSocketChatController(ChatController):
         for m in messages:
             data = m.model_dump(mode="json")
             if m.role == Role.ASSISTANT:
+                # Use display text (interim narration stripped) if available
+                display = self._message_display_text.get(id(m))
+                if display is not None:
+                    data["content"] = display
                 blocks = self._message_rich_mcp.get(id(m))
                 if blocks:
                     for entry in blocks:
@@ -2587,22 +2860,36 @@ async def _handle_client_message(
                     except Exception as e:
                         logger.warning("[WS] on_message_intercept error: %s", e)
                 if intercept_result is not None:
-                    # Synthetic assistant response (user bubble already rendered client-side)
-                    model_info = llm_manager.get_model_info(controller.model)
-                    await controller._send({
-                        "type": "response_started",
-                        "model": controller.model,
-                        "model_icon": model_info.model_icon if model_info else "",
-                        "model_label": model_info.label if model_info else controller.model,
-                        "intercept": True,
-                    })
-                    await controller._send({"type": "text_chunk", "content": intercept_result})
-                    await controller._send({"type": "response_completed", "intercept": True})
-                    await controller._send({
-                        "type": "tools_updated",
-                        "tools": controller.get_all_known_tools(),
-                    })
-                    return
+                    if setup_hybrid_intercept(controller, intercept_result):
+                        pass  # Hybrid: fall through to LLM send below
+                    else:
+                        # Pure intercept (dev commands etc.) — no LLM follow-up
+                        # Store user + assistant messages in history for persistence
+                        from llming_models.llm_base_models import ChatMessage, Role
+                        controller.session.history.add_message(
+                            ChatMessage(role=Role.USER, content=text))
+                        controller.session.history.add_message(
+                            ChatMessage(role=Role.ASSISTANT, content=intercept_result))
+
+                        _model = controller.model if not controller._auto_select else controller._auto_select_base_model or controller.model
+                        try:
+                            model_info = llm_manager.get_model_info(_model)
+                        except ValueError:
+                            model_info = None
+                        await controller._send({
+                            "type": "response_started",
+                            "model": controller.model,
+                            "model_icon": model_info.model_icon if model_info else "",
+                            "model_label": model_info.label if model_info else controller.model,
+                            "intercept": True,
+                        })
+                        await controller._send({"type": "text_chunk", "content": intercept_result})
+                        await controller._send({"type": "response_completed", "intercept": True, "full_text": intercept_result})
+                        await controller._send({
+                            "type": "tools_updated",
+                            "tools": controller.get_all_known_tools(),
+                        })
+                        return
 
             async def _run_send():
                 try:
@@ -2877,9 +3164,16 @@ async def _handle_client_message(
             controller._model_locked = False
             controller._model_locked_reason = ""
             await controller._send({"type": "model_unlocked"})
+            # Restore auto-select state
+            if getattr(controller, '_saved_auto_select', False):
+                controller._auto_select = True
+                controller._saved_auto_select = False
             saved = getattr(controller, '_saved_model_pref', None)
             if saved:
-                await controller.switch_model(saved, _force=True)
+                if saved == "@auto":
+                    controller._auto_select = True
+                else:
+                    await controller.switch_model(saved, _force=True)
                 controller._saved_model_pref = None
                 logger.info("[NEW_CHAT] Restored model preference: %s", saved)
 
@@ -3373,8 +3667,8 @@ async def _handle_client_message(
                 service = controller._get_speech_service()
                 # Extract ISO-639-1 language code from locale (e.g. "de-de" → "de")
                 lang = controller._locale[:2] if controller._locale else ""
-                text = await service.transcribe(audio_bytes, filename, content_type, language=lang)
-                await controller._send({"type": "transcription_result", "text": text})
+                stt_result = await service.transcribe(audio_bytes, filename=filename, content_type=content_type, language=lang)
+                await controller._send({"type": "transcription_result", "text": stt_result.text})
             except Exception as e:
                 logger.error(f"[STT] Transcription failed: {e}")
                 await controller._send({
@@ -3388,12 +3682,12 @@ async def _handle_client_message(
         if text:
             try:
                 service = controller._get_speech_service()
-                mp3_bytes, word_timings = await service.synthesize(text, locale=controller._locale, voice=controller._tts_voice)
-                audio_b64 = base64.b64encode(mp3_bytes).decode("ascii")
+                result = await service.synthesize(text, voice=controller._tts_voice or "nova", language=controller._locale, with_timings=True)
+                audio_b64 = base64.b64encode(result.audio_bytes).decode("ascii")
                 await controller._send({
                     "type": "tts_audio",
                     "audio_b64": audio_b64,
-                    "word_timings": word_timings,
+                    "word_timings": [{"word": w.text, "start": w.start, "end": w.end} for w in result.word_timings],
                 })
             except Exception as e:
                 logger.error(f"[TTS] Synthesis failed: {e}")
@@ -3407,11 +3701,11 @@ async def _handle_client_message(
         # Start a server-proxied Realtime session (API key stays on server)
         try:
             import websockets
-            from llming_lodge.speech_service import SpeechService
+            from llming_models.media import OpenAIMediaProvider
             service = controller._get_speech_service()
-            voice = controller._tts_voice or controller._tts_default_voice or SpeechService.TTS_DEFAULT_VOICE
+            voice = controller._tts_voice or controller._tts_default_voice or "cedar"
             instructions = controller._base_system_prompt or "You are a helpful assistant."
-            lang_name = SpeechService._LOCALE_NAMES.get(controller._locale, "")
+            lang_name = OpenAIMediaProvider._LOCALE_NAMES.get(controller._locale, "")
             if lang_name:
                 instructions += f"\nSpeak in {lang_name}."
 
@@ -3514,6 +3808,7 @@ async def _handle_client_message(
             controller._rt_relay_task = None
 
     elif msg_type == "heartbeat":
+        entry.last_heartbeat = time.monotonic()
         await controller._send({"type": "heartbeat_ack"})
 
     elif msg_type == "save_preset":
@@ -3834,7 +4129,12 @@ async def _handle_client_message(
                 })
 
     else:
-        logger.warning(f"[WS] Unknown message type: {msg_type}")
+        # Check for custom WS message handlers registered by external code
+        custom_handlers = getattr(controller, "_custom_ws_handlers", None)
+        if custom_handlers and msg_type in custom_handlers:
+            await custom_handlers[msg_type](msg, controller)
+        else:
+            logger.warning(f"[WS] Unknown message type: {msg_type}")
 
 
 async def _apply_doc_plugins(
