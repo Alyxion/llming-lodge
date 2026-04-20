@@ -655,10 +655,15 @@ def setup_routes(app, *, debug: bool = False, nudge_store=None) -> None:
     - Public API — droplets + remote chat (if ``nudge_store`` is provided)
     """
     from starlette.staticfiles import StaticFiles
-    from llming_com.client_static import mount_client_static
+    from llming_com import mount_client_static
+    from llming_docs import get_static_dir as _doc_static_dir
 
     app.mount(STATIC_PREFIX, StaticFiles(directory=get_static_path()), name="llming-static")
     app.mount("/chat-static", StaticFiles(directory=get_chat_static_path()), name="chat-static")
+    # llming-docs owns all client-side document-type assets (plugin JS + CSS).
+    # Mounted at /doc-static/; the chat page loads /doc-static/plugins/doc-plugins.js
+    # during boot and calls window.registerLlmingDocPlugins(registry).
+    app.mount("/doc-static", StaticFiles(directory=str(_doc_static_dir())), name="doc-static")
     mount_client_static(app)
 
     app.include_router(build_http_router())

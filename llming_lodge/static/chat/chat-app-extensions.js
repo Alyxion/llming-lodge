@@ -111,6 +111,42 @@
     });
   }
 
+  // ── Loading overlay (shown immediately while server prepares data) ──
+
+  function _showLoadingOverlay(name, label, icon) {
+    const id = `appext-loading-${name}`;
+    if (document.getElementById(id)) return;
+    const el = document.createElement('div');
+    el.id = id;
+    el.style.cssText =
+      'position:fixed;inset:0;z-index:300000;background:rgba(0,0,0,0.5);' +
+      'backdrop-filter:blur(8px);display:flex;align-items:center;justify-content:center;' +
+      'font-family:-apple-system,system-ui,sans-serif;animation:rvF 0.15s ease;';
+    el.innerHTML = `<div style="background:#111327;border-radius:12px;padding:40px 60px;text-align:center;
+      box-shadow:0 20px 60px rgba(0,0,0,0.6);min-width:280px">
+      <span class="material-icons" style="font-size:36px;color:#7fdbca;display:block;margin-bottom:12px">${icon}</span>
+      <div style="color:#f9fafb;font-size:15px;font-weight:600;margin-bottom:16px">${label}</div>
+      <div style="display:flex;justify-content:center;gap:6px">
+        <span style="width:8px;height:8px;border-radius:50%;background:#7fdbca;animation:appExtDot 1s ease-in-out infinite"></span>
+        <span style="width:8px;height:8px;border-radius:50%;background:#7fdbca;animation:appExtDot 1s ease-in-out 0.15s infinite"></span>
+        <span style="width:8px;height:8px;border-radius:50%;background:#7fdbca;animation:appExtDot 1s ease-in-out 0.3s infinite"></span>
+      </div>
+    </div>`;
+    // Add keyframe if not present
+    if (!document.getElementById('appext-loading-style')) {
+      const style = document.createElement('style');
+      style.id = 'appext-loading-style';
+      style.textContent = '@keyframes appExtDot{0%,80%,100%{opacity:.3;transform:scale(.8)}40%{opacity:1;transform:scale(1.1)}}';
+      document.head.appendChild(style);
+    }
+    document.body.appendChild(el);
+  }
+
+  function _removeLoadingOverlay(name) {
+    const el = document.getElementById(`appext-loading-${name}`);
+    if (el) el.remove();
+  }
+
   // ── ChatApp integration (prototype mixin) ─────────────────
 
   Object.assign(window._ChatAppProto, {
@@ -135,6 +171,9 @@
 
       state.loading.add(name);
 
+      // Show loading overlay immediately (before async server/script load)
+      _showLoadingOverlay(name, manifest.label || name, manifest.icon || 'extension');
+
       // 1. Load client script (if needed) in parallel with server activation
       const scriptPromise = state.loaded.has(name)
         ? Promise.resolve()
@@ -157,6 +196,7 @@
       try {
         const [, config] = await Promise.all([scriptPromise, configPromise]);
         state.loading.delete(name);
+        _removeLoadingOverlay(name);
 
         const def = _definitions[name];
         if (!def) {
@@ -175,6 +215,7 @@
         return true;
       } catch (err) {
         state.loading.delete(name);
+        _removeLoadingOverlay(name);
         console.error(`[AppExt] Activation failed for "${name}":`, err);
         return false;
       }

@@ -321,7 +321,7 @@ class TestGenerateImageGemini:
     @pytest.mark.asyncio
     async def test_uses_explicit_api_key(self):
         with patch(
-            "llming_models.tools.gemini_image.generate_image_with_gemini",
+            "llming_lodge.tools.gemini_image.generate_image_with_gemini",
             new_callable=AsyncMock,
             return_value="base64data",
         ) as mock_gen:
@@ -344,7 +344,7 @@ class TestGenerateImageGemini:
         mock_client._client.google_api_key = "client-key"
 
         with patch(
-            "llming_models.tools.gemini_image.generate_image_with_gemini",
+            "llming_lodge.tools.gemini_image.generate_image_with_gemini",
             new_callable=AsyncMock,
             return_value="data",
         ) as mock_gen:
@@ -362,7 +362,7 @@ class TestGenerateImageGemini:
     @pytest.mark.asyncio
     async def test_custom_aspect_ratio(self):
         with patch(
-            "llming_models.tools.gemini_image.generate_image_with_gemini",
+            "llming_lodge.tools.gemini_image.generate_image_with_gemini",
             new_callable=AsyncMock,
             return_value="data",
         ) as mock_gen:

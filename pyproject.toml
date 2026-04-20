@@ -42,6 +42,9 @@ uvicorn = "*"
 # Communication layer (shared with hub)
 llming-com = {path = "../llming-com", develop = true}
 
+# Document system (canonical location for doc plugins)
+llming-docs = {path = "../llming-docs", develop = true}
+
 # Document processing
 pdfplumber = ">=0.11"
 pypdfium2 = ">=4.0"

@@ -105,7 +105,7 @@ def create_app():
         get_static_path, get_chat_static_path, get_ws_router,
         API_PREFIX, STATIC_PREFIX,
     )
-    from llming_com.auth import get_auth as _auth, AUTH_COOKIE_NAME, SESSION_COOKIE_NAME
+    from llming_com.auth import get_auth as _auth
 
     @asynccontextmanager
     async def lifespan(_a):
@@ -167,15 +167,18 @@ def create_app():
 
         html = build_chat_html(config_json, "[]", "Chat")
 
-        # Set auth + session cookies on response
-        token = _auth().sign_auth_token(session_id)
+        # Set auth + session cookies on response. Cookie names come from the
+        # AuthManager instance so per-app isolation holds when multiple
+        # llming-com apps share a domain.
+        _a = _auth()
+        token = _a.sign_auth_token(session_id)
         response = HTMLResponse(html)
         response.set_cookie(
-            AUTH_COOKIE_NAME, token,
+            _a.auth_cookie_name, token,
             path="/", max_age=86400, samesite="lax",
         )
         response.set_cookie(
-            SESSION_COOKIE_NAME, session_id,
+            _a.session_cookie_name, session_id,
             path="/", max_age=86400, samesite="lax", httponly=True,
         )
         return response

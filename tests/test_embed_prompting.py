@@ -20,10 +20,10 @@ import pytest
 
 dotenv.load_dotenv(os.path.join(os.path.dirname(__file__), "..", "..", "..", ".env"))
 
-from llming_lodge.doc_plugins.document_store import DocumentSessionStore
-from llming_lodge.doc_plugins.manager import DocPluginManager
-from llming_lodge.doc_plugins.text_doc_mcp import TextDocMCP
-from llming_lodge.doc_plugins.creator_mcp import DocumentCreatorMCP
+from llming_docs.document_store import DocumentSessionStore
+from llming_docs.manager import DocPluginManager
+from llming_docs.text_doc_mcp import TextDocMCP
+from llming_docs.creator_mcp import DocumentCreatorMCP
 
 logger = logging.getLogger(__name__)
 

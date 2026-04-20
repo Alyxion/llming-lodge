@@ -29,6 +29,13 @@ class MarkdownRenderer {
         const originalCode = renderer.code?.bind(renderer);
         renderer.code = function({ text, lang }) {
           if (lang && self._pluginRegistry.has(lang)) {
+            // Tool-only policy: doc-type fenced blocks are not allowed. The
+            // server strips them at response completion. We return an empty
+            // HTML comment so nothing renders in the meantime — and so there's
+            // a grep-able marker in the DOM if we ever need to audit.
+            if (!self._pluginRegistry.fencedBlockAllowed(lang)) {
+              return '<!-- fenced doc block suppressed (tool-only policy) -->';
+            }
             // During streaming, show a spinner placeholder — don't render or register
             if (self.streaming) {
               let name = lang;

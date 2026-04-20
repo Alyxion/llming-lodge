@@ -15,7 +15,7 @@ import textwrap
 import pytest
 
 # ── render.py ─────────────────────────────────────────────────────────────
-from llming_lodge.doc_plugins.render import (
+from llming_docs.render import (
     EMBED_BEHAVIOR,
     EMBED_RULES,
     EmbedBehavior,
@@ -31,7 +31,7 @@ from llming_lodge.doc_plugins.render import (
 )
 
 # ── table_exporter.py ─────────────────────────────────────────────────────
-from llming_lodge.doc_plugins.table_exporter import (
+from llming_docs.table_exporter import (
     _coerce_value,
     _normalize_spec,
     export_csv,
@@ -39,10 +39,10 @@ from llming_lodge.doc_plugins.table_exporter import (
 )
 
 # ── html_exporter.py ──────────────────────────────────────────────────────
-from llming_lodge.doc_plugins.html_exporter import _escape_html, export_html
+from llming_docs.html_exporter import _escape_html, export_html
 
 # ── word_exporter.py ──────────────────────────────────────────────────────
-from llming_lodge.doc_plugins.word_exporter import export_docx, _strip_html
+from llming_docs.word_exporter import export_docx, _strip_html
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1637,8 +1637,8 @@ class TestTextDocMcpEmbed:
 
     def test_add_embed_section(self):
         """The MCP tool should accept type='embed' with $ref."""
-        from llming_lodge.doc_plugins.document_store import DocumentSessionStore
-        from llming_lodge.doc_plugins.text_doc_mcp import TextDocMCP
+        from llming_docs.document_store import DocumentSessionStore
+        from llming_docs.text_doc_mcp import TextDocMCP
         import asyncio
         import json
 
@@ -1667,8 +1667,8 @@ class TestTextDocMcpEmbed:
 
     def test_embed_without_ref_fails(self):
         """Embed section without $ref should fail."""
-        from llming_lodge.doc_plugins.document_store import DocumentSessionStore
-        from llming_lodge.doc_plugins.text_doc_mcp import TextDocMCP
+        from llming_docs.document_store import DocumentSessionStore
+        from llming_docs.text_doc_mcp import TextDocMCP
         import asyncio
         import json
 
@@ -1687,8 +1687,8 @@ class TestTextDocMcpEmbed:
 
     def test_embed_section_preview(self):
         """Preview of an embed section should show the ref."""
-        from llming_lodge.doc_plugins.text_doc_mcp import TextDocMCP
-        from llming_lodge.doc_plugins.document_store import DocumentSessionStore
+        from llming_docs.text_doc_mcp import TextDocMCP
+        from llming_docs.document_store import DocumentSessionStore
 
         store = DocumentSessionStore()
         mcp = TextDocMCP(store)
@@ -1699,8 +1699,8 @@ class TestTextDocMcpEmbed:
 
     def test_embed_section_in_list_sections(self):
         """List sections should include embed sections."""
-        from llming_lodge.doc_plugins.document_store import DocumentSessionStore
-        from llming_lodge.doc_plugins.text_doc_mcp import TextDocMCP
+        from llming_docs.document_store import DocumentSessionStore
+        from llming_docs.text_doc_mcp import TextDocMCP
         import asyncio
         import json
 
@@ -1724,8 +1724,8 @@ class TestTextDocMcpEmbed:
 
     def test_add_regular_section_still_requires_content(self):
         """Non-embed sections should still work with content."""
-        from llming_lodge.doc_plugins.document_store import DocumentSessionStore
-        from llming_lodge.doc_plugins.text_doc_mcp import TextDocMCP
+        from llming_docs.document_store import DocumentSessionStore
+        from llming_docs.text_doc_mcp import TextDocMCP
         import asyncio
         import json
 
@@ -1748,8 +1748,8 @@ class TestTextDocMcpEmbed:
 
     def test_embed_with_position(self):
         """Embed can be inserted at a specific position."""
-        from llming_lodge.doc_plugins.document_store import DocumentSessionStore
-        from llming_lodge.doc_plugins.text_doc_mcp import TextDocMCP
+        from llming_docs.document_store import DocumentSessionStore
+        from llming_docs.text_doc_mcp import TextDocMCP
         import asyncio
         import json
 
@@ -1780,8 +1780,8 @@ class TestTextDocMcpEmbed:
 
     def test_multiple_embeds_in_document(self):
         """Multiple embeds referencing different documents."""
-        from llming_lodge.doc_plugins.document_store import DocumentSessionStore
-        from llming_lodge.doc_plugins.text_doc_mcp import TextDocMCP
+        from llming_docs.document_store import DocumentSessionStore
+        from llming_docs.text_doc_mcp import TextDocMCP
         import asyncio
         import json
 
@@ -1805,8 +1805,8 @@ class TestTextDocMcpEmbed:
 
     def test_update_embed_section(self):
         """Can update an embed section to change its $ref."""
-        from llming_lodge.doc_plugins.document_store import DocumentSessionStore
-        from llming_lodge.doc_plugins.text_doc_mcp import TextDocMCP
+        from llming_docs.document_store import DocumentSessionStore
+        from llming_docs.text_doc_mcp import TextDocMCP
         import asyncio
         import json
 
@@ -1833,8 +1833,8 @@ class TestTextDocMcpEmbed:
 
     def test_delete_embed_section(self):
         """Can delete an embed section."""
-        from llming_lodge.doc_plugins.document_store import DocumentSessionStore
-        from llming_lodge.doc_plugins.text_doc_mcp import TextDocMCP
+        from llming_docs.document_store import DocumentSessionStore
+        from llming_docs.text_doc_mcp import TextDocMCP
         import asyncio
         import json
 
@@ -1864,8 +1864,8 @@ class TestTextDocMcpEmbed:
 
     def test_move_embed_section(self):
         """Can move an embed section to a new position."""
-        from llming_lodge.doc_plugins.document_store import DocumentSessionStore
-        from llming_lodge.doc_plugins.text_doc_mcp import TextDocMCP
+        from llming_docs.document_store import DocumentSessionStore
+        from llming_docs.text_doc_mcp import TextDocMCP
         import asyncio
         import json
 
@@ -1895,8 +1895,8 @@ class TestTextDocMcpEmbed:
 
     def test_search_skips_embed_content(self):
         """Search should handle embed sections gracefully (no content to search)."""
-        from llming_lodge.doc_plugins.document_store import DocumentSessionStore
-        from llming_lodge.doc_plugins.text_doc_mcp import TextDocMCP
+        from llming_docs.document_store import DocumentSessionStore
+        from llming_docs.text_doc_mcp import TextDocMCP
         import asyncio
         import json
 
@@ -1921,8 +1921,8 @@ class TestTextDocMcpEmbed:
 
     def test_complex_doc_with_mixed_sections_and_embeds(self):
         """Full document with headings, paragraphs, tables, and embeds."""
-        from llming_lodge.doc_plugins.document_store import DocumentSessionStore
-        from llming_lodge.doc_plugins.text_doc_mcp import TextDocMCP
+        from llming_docs.document_store import DocumentSessionStore
+        from llming_docs.text_doc_mcp import TextDocMCP
         import asyncio
         import json
 

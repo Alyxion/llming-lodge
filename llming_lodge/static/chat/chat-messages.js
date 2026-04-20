@@ -1363,6 +1363,14 @@
         this.el.newChat.innerHTML = `<span class="material-icons" style="font-size:16px">add</span> ${this.t('chat.new_chat')}`;
       }
 
+      // Search Chats button
+      const searchBtn = document.getElementById('cv2-search-chats');
+      if (searchBtn) {
+        const kbd = navigator.platform.includes('Mac') ? '\u2318K' : 'Ctrl+K';
+        searchBtn.title = this.t('chat.search_chats');
+        searchBtn.innerHTML = `<span class="material-icons" style="font-size:16px">search</span> ${this.t('chat.search_chats')} <span class="cv2-search-chats-kbd">${kbd}</span>`;
+      }
+
       // Gear popover items — refresh theme selector label on language change
       if (this._renderThemeSelector) this._renderThemeSelector();
       if (this.el.speechToggle) {

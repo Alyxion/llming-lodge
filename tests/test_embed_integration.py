@@ -19,13 +19,13 @@ import zipfile
 
 import pytest
 
-from llming_lodge.doc_plugins.document_store import DocumentSessionStore
-from llming_lodge.doc_plugins.text_doc_mcp import TextDocMCP
-from llming_lodge.doc_plugins.email_mcp import EmailDraftMCP
-from llming_lodge.doc_plugins.table_exporter import export_xlsx
-from llming_lodge.doc_plugins.html_exporter import export_html
-from llming_lodge.doc_plugins.word_exporter import export_docx
-from llming_lodge.doc_plugins.render import (
+from llming_docs.document_store import DocumentSessionStore
+from llming_docs.text_doc_mcp import TextDocMCP
+from llming_docs.email_mcp import EmailDraftMCP
+from llming_docs.table_exporter import export_xlsx
+from llming_docs.html_exporter import export_html
+from llming_docs.word_exporter import export_docx
+from llming_docs.render import (
     EMBED_BEHAVIOR,
     EmbedBehavior,
     RenderContext,
@@ -114,7 +114,7 @@ def _create_plotly_chart(store: DocumentSessionStore) -> str:
             "showlegend": True,
         },
     }
-    doc = store.create(type="plotly", name="sin(x) Plot", data=plotly_data)
+    doc = store.create(type="plotly", name="sin(x) Plot", data=plotly_data, skip_validation=True)
     return doc.id
 
 
@@ -138,7 +138,7 @@ class TestStep1_EmbedInWordDoc:
 
         # Create Word document with embed section referencing chart
         mcp = TextDocMCP(store)
-        word_doc = store.create(type="text_doc", name="Analysis Report", data={"sections": []})
+        word_doc = store.create(type="text_doc", name="Analysis Report", data={"sections": []}, skip_validation=True)
 
         # Add heading
         result = _run(mcp.call_tool("text_doc_add_section", {
@@ -265,7 +265,7 @@ class TestStep3_TableToXlsx:
                 [6.28, 0.0, 1.0],
             ],
         }
-        table_doc = store.create(type="table", name="Trig Values", data=table_data)
+        table_doc = store.create(type="table", name="Trig Values", data=table_data, skip_validation=True)
 
         result = render_to("table", table_data, "xlsx")
         assert result.content_type == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -285,7 +285,7 @@ class TestStep3_TableToXlsx:
         chart_id = _create_plotly_chart(store)
         mcp = TextDocMCP(store)
 
-        word_doc = store.create(type="text_doc", name="Full Report", data={"sections": []})
+        word_doc = store.create(type="text_doc", name="Full Report", data={"sections": []}, skip_validation=True)
 
         # Add embed for chart
         _run(mcp.call_tool("text_doc_add_section", {
@@ -387,7 +387,7 @@ class TestStep4_ClientSideEmbedResolution:
         table_doc = store.create(type="table", name="Data", data={
             "columns": ["A", "B"],
             "rows": [["1", "2"], ["3", "4"]],
-        })
+        }, skip_validation=True)
 
         resolved = self._resolve_embed_for_docx(store, {"$ref": table_doc.id})
         assert len(resolved) == 1
@@ -401,7 +401,7 @@ class TestStep4_ClientSideEmbedResolution:
             "sections": [
                 {"type": "paragraph", "content": "Inline text from sub-doc"},
             ],
-        })
+        }, skip_validation=True)
 
         resolved = self._resolve_embed_for_docx(store, {"$ref": sub_doc.id})
         assert len(resolved) == 1
@@ -415,7 +415,7 @@ class TestStep4_ClientSideEmbedResolution:
         table_doc = store.create(type="table", name="Values", data={
             "columns": ["x", "y"],
             "rows": [["0", "0"], ["1", "0.84"]],
-        })
+        }, skip_validation=True)
 
         # Simulate what client does: resolve each embed section
         raw_sections = [
@@ -463,13 +463,13 @@ class TestStep5_EmailDraftWithAttachments:
                 {"type": "heading", "level": 1, "content": "Report"},
                 {"type": "embed", "$ref": chart_id},
             ],
-        })
+        }, skip_validation=True)
 
         # Create table doc
         table_doc = store.create(type="table", name="Data.xlsx", data={
             "columns": ["x", "sin(x)"],
             "rows": [[0, 0.0], [1.57, 1.0], [3.14, 0.0]],
-        })
+        }, skip_validation=True)
 
         # Create email draft
         email_mcp = EmailDraftMCP(store)
@@ -480,7 +480,7 @@ class TestStep5_EmailDraftWithAttachments:
             "bcc": [],
             "body_html": "<p>Please find the attached report.</p>",
             "attachments": [],
-        })
+        }, skip_validation=True)
 
         # Add Word doc as attachment
         result = _run(email_mcp.call_tool("email_add_attachment", {
@@ -598,13 +598,13 @@ class TestStep6_ResolveAndExportAttachments:
                 {"type": "embed", "$ref": chart_id},
                 {"type": "paragraph", "content": "Conclusion."},
             ],
-        })
+        }, skip_validation=True)
 
         # Table doc
         table_doc = store.create(type="table", name="Data", data={
             "columns": ["x", "sin(x)"],
             "rows": [[0, 0], [1, 0.84], [2, 0.91]],
-        })
+        }, skip_validation=True)
 
         # Resolve each attachment
         chart_att = self._resolve_attachment(store, chart_id)
@@ -633,7 +633,7 @@ class TestStep6_ResolveAndExportAttachments:
         table_doc = store.create(type="table", name="Metrics", data={
             "columns": ["Metric", "Value"],
             "rows": [["Revenue", "$1.2M"], ["Growth", "+15%"]],
-        })
+        }, skip_validation=True)
 
         word_doc = store.create(type="text_doc", name="Report", data={
             "title": "Metrics Report",
@@ -641,7 +641,7 @@ class TestStep6_ResolveAndExportAttachments:
                 {"type": "heading", "level": 1, "content": "Key Metrics"},
                 {"type": "embed", "$ref": table_doc.id},
             ],
-        })
+        }, skip_validation=True)
 
         att = self._resolve_attachment(store, word_doc.id)
         assert att is not None
@@ -679,7 +679,7 @@ class TestStep7_EmailSendWithMockedGraph:
         word_doc = store.create(type="text_doc", name="Analysis", data={
             "title": "Sin Analysis",
             "sections": [],
-        })
+        }, skip_validation=True)
         _run(mcp.call_tool("text_doc_add_section", {
             "document_id": word_doc.id,
             "type": "heading",
@@ -701,7 +701,7 @@ class TestStep7_EmailSendWithMockedGraph:
         table_doc = store.create(type="table", name="Values", data={
             "columns": ["x", "sin(x)"],
             "rows": [[0, 0], [1.57, 1.0], [3.14, 0], [4.71, -1.0]],
-        })
+        }, skip_validation=True)
 
         # 4. Create email draft with all attachments
         email_mcp = EmailDraftMCP(store)
@@ -712,7 +712,7 @@ class TestStep7_EmailSendWithMockedGraph:
             "bcc": [],
             "body_html": "<h1>Report</h1><p>See attachments.</p>",
             "attachments": [],
-        })
+        }, skip_validation=True)
 
         for ref_id, name in [
             (word_doc.id, "Analysis.docx"),
@@ -825,7 +825,7 @@ class TestStep7_EmailSendWithMockedGraph:
             "to": ["a@b.com"],
             "body_html": "<p>Hi</p>",
             "attachments": [],
-        })
+        }, skip_validation=True)
 
         _run(email_mcp.call_tool("email_add_attachment", {
             "document_id": email_doc.id,
@@ -852,7 +852,7 @@ class TestStep7_EmailSendWithMockedGraph:
             "to": ["a@b.com"],
             "body_html": "",
             "attachments": [],
-        })
+        }, skip_validation=True)
 
         _run(email_mcp.call_tool("email_add_attachment", {
             "document_id": email_doc.id,
@@ -883,7 +883,7 @@ class TestStep8_EdgeCases:
         chart_id = _create_plotly_chart(store)
 
         mcp = TextDocMCP(store)
-        doc = store.create(type="text_doc", name="Double Chart", data={"sections": []})
+        doc = store.create(type="text_doc", name="Double Chart", data={"sections": []}, skip_validation=True)
 
         _run(mcp.call_tool("text_doc_add_section", {
             "document_id": doc.id, "type": "embed", "ref": chart_id,
@@ -916,7 +916,7 @@ class TestStep8_EdgeCases:
         """Embed with nonexistent ref should not crash export."""
         store = DocumentSessionStore()
         mcp = TextDocMCP(store)
-        doc = store.create(type="text_doc", name="Test", data={"sections": []})
+        doc = store.create(type="text_doc", name="Test", data={"sections": []}, skip_validation=True)
 
         _run(mcp.call_tool("text_doc_add_section", {
             "document_id": doc.id,
@@ -951,7 +951,7 @@ class TestStep8_EdgeCases:
                 {"type": "paragraph", "content": "Inner paragraph 1"},
                 {"type": "paragraph", "content": "Inner paragraph 2"},
             ],
-        })
+        }, skip_validation=True)
 
         outer_doc = store.create(type="text_doc", name="Outer", data={
             "sections": [
@@ -959,7 +959,7 @@ class TestStep8_EdgeCases:
                 {"type": "embed", "$ref": inner_doc.id},
                 {"type": "paragraph", "content": "After inner doc"},
             ],
-        })
+        }, skip_validation=True)
 
         # Resolve: text embed → splice inner sections
         behavior = get_embed_behavior("text_doc")
@@ -991,18 +991,18 @@ class TestStep8_EdgeCases:
 
         table_doc = store.create(type="table", name="T", data={
             "columns": ["A"], "rows": [["1"]],
-        })
+        }, skip_validation=True)
         word_doc = store.create(type="text_doc", name="W", data={
             "title": "W", "sections": [{"type": "paragraph", "content": "text"}],
-        })
+        }, skip_validation=True)
         html_doc = store.create(type="html_sandbox", name="H", data={
             "html": "<p>Hello</p>", "title": "Page",
-        })
+        }, skip_validation=True)
 
         email_mcp = EmailDraftMCP(store)
         email = store.create(type="email_draft", name="All Types", data={
             "subject": "All", "to": ["x@y.com"], "body_html": "", "attachments": [],
-        })
+        }, skip_validation=True)
 
         for ref_id, name in [
             (chart_id, "chart.png"),

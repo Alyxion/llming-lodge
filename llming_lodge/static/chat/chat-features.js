@@ -18,12 +18,13 @@ class ChatApp {
   static MAX_SINGLE_FILE = 10 * 1024 * 1024;  // 10 MB
   static MAX_TOTAL_SIZE = 50 * 1024 * 1024;   // 50 MB
   static MAX_IMAGE_DIM = 3840;
-  static DOC_ICONS = {
-    plotly: 'bar_chart', latex: 'functions', table: 'table_chart',
-    text_doc: 'description', word: 'description',
-    presentation: 'slideshow', powerpoint: 'slideshow',
-    html: 'code', email_draft: 'mail',
-  };
+  // DOC_ICONS is sourced from the server config (window.__CHAT_CONFIG__.docIcons)
+  // which reflects llming_docs.frontend.DOC_ICONS — the authoritative registry.
+  // The host never hard-codes format metadata; new doc types added in
+  // llming-docs automatically show up here without a host change.
+  static get DOC_ICONS() {
+    return window.__CHAT_CONFIG__?.docIcons || {};
+  }
 }
 
 window.ChatApp = ChatApp;

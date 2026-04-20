@@ -38,11 +38,12 @@ from html import escape as html_escape
 from typing import Optional
 from uuid import uuid4
 
+from llming_docs import DOC_ICONS, get_mcp_group_labels
 from llming_lodge.chat_config import (
     ChatAppConfig, ChatUserConfig, ChatFrontendConfig, ThemeConfig,
 )
 from llming_lodge.server import API_PREFIX
-from llming_com.auth import IDENTITY_COOKIE_NAME, get_auth as _auth
+from llming_com.auth import get_auth as _auth
 
 logger = logging.getLogger(__name__)
 
@@ -200,6 +201,9 @@ def _build_css_urls() -> list[str]:
         _hashed_url("chat-presets.css"),
         _hashed_url("chat-nudges.css"),
         _hashed_url("chat-documents.css"),
+        # Doc-type specific styles (plotly/table/text_doc/presentation/html/
+        # email/latex) are owned by llming-docs; served from its static dir.
+        "/doc-static/css/doc-plugins.css",
         _hashed_url("chat-search.css"),
         _hashed_url("chat-bolts.css"),
         _hashed_url("chat-followup.css"),
@@ -220,9 +224,13 @@ def _build_script_phases() -> tuple[list[str], list[str], str]:
         _hashed_url("vendor/codemirror/jshint.min.js"),
         _hashed_url("vendor/codemirror/codemirror.min.js"),
     ]
+    # Plugin foundation — entirely owned by llming-docs. The registry, the
+    # cross-block reference store (including per-type compatibility shims),
+    # and the AI-edit helper are served from /doc-static/. Host has no
+    # format-specific code.
     plugin_foundation = [
-        _hashed_url("plugins/doc-plugin-registry.js"),
-        _hashed_url("plugins/block-data-store.js"),
+        "/doc-static/plugins/doc-plugin-registry.js",
+        "/doc-static/plugins/block-data-store.js",
     ]
     features_first = _hashed_url("chat-features.js")
 
@@ -238,10 +246,17 @@ def _build_script_phases() -> tuple[list[str], list[str], str]:
     ]
     phase2_plugins = [
         _hashed_url("chat-popup-utils.js"),
-        _hashed_url("plugins/ai-edit-shared.js"),
+        # ai-edit-shared — owned by llming-docs (shared by text_doc + email_draft
+        # plugins). Served from /doc-static/.
+        "/doc-static/plugins/ai-edit-shared.js",
         _hashed_url("chat-followup.js"),
     ]
     builtin_plugins = _hashed_url("plugins/builtin-plugins.js")
+    # Document-type plugins are owned by llming-docs and served from its
+    # static dir at /doc-static/. Loaded in Phase 2 so chat-app-core's
+    # boot (Phase 3) can call window.registerLlmingDocPlugins(registry)
+    # alongside the host's own registerBuiltinPlugins.
+    doc_plugins = "/doc-static/plugins/doc-plugins.js"
     bolt_apps = [
         _hashed_url("system-droplets/math/calculator.js"),
         _hashed_url("system-droplets/timekeeper/timekeeper.js"),
@@ -265,7 +280,7 @@ def _build_script_phases() -> tuple[list[str], list[str], str]:
         _hashed_url("chat-app-extensions.js"),
     ]
 
-    phase2 = codemirror_addons + phase2_plugins + [builtin_plugins] + bolt_apps + feature_modules
+    phase2 = codemirror_addons + phase2_plugins + [builtin_plugins, doc_plugins] + bolt_apps + feature_modules
 
     phase3 = _hashed_url("chat-app-core.js")
 
@@ -466,8 +481,12 @@ class ChatPage:
         from starlette.routing import Route
         from starlette.requests import Request
         from starlette.responses import HTMLResponse, Response, RedirectResponse
-        from llming_com.auth import SESSION_COOKIE_NAME, AUTH_COOKIE_NAME
         _auth_mgr = _auth()
+        # Cookie names are sourced from the AuthManager instance so they
+        # respect the host's per-app prefix (e.g. "myapp_session").
+        SESSION_COOKIE_NAME = _auth_mgr.session_cookie_name
+        AUTH_COOKIE_NAME = _auth_mgr.auth_cookie_name
+        IDENTITY_COOKIE_NAME = _auth_mgr.identity_cookie_name
         from llming_lodge.api.chat_session_api import SessionRegistry
 
         page_path = self._page_path
@@ -482,6 +501,13 @@ class ChatPage:
             to create a new session, set cookies, serve HTML.
             Fallback: redirect to ``auth_path`` for NiceGUI OAuth.
             """
+            try:
+                return await _serve_chat_page_impl(request)
+            except Exception as e:
+                from llming_com import error_response
+                return error_response(e, request_path=request.url.path)
+
+        async def _serve_chat_page_impl(request: Request):
             registry = SessionRegistry.get()
 
             # ── Fast path: existing session ──
@@ -670,8 +696,6 @@ class ChatPage:
         controller._budget_limits_for_user = user_config.budget_limits_for_user
         controller._system_nudge_keys = ac.system_nudges
         controller._app_ext_manager = ext_manager
-        if user_config.custom_ws_handlers:
-            controller._custom_ws_handlers = dict(user_config.custom_ws_handlers)
 
         # ── Nudges: master + discoverable ──
         controller._master_prompt = ""
@@ -727,8 +751,8 @@ class ChatPage:
                         user_config.user_teams or [],
                     )
                 # Include system nudges in discoverable
-                from llming_lodge.system_nudges import _meta as _sys_nudge_meta
-                for sys_uid, sys_nudge in _sys_nudge_meta.items():
+                from llming_lodge.system_nudges import SYSTEM_NUDGE_REGISTRY
+                for sys_key, sys_nudge in SYSTEM_NUDGE_REGISTRY.items():
                     # Filter by email patterns
                     patterns = sys_nudge.get("email_patterns", [])
                     if patterns:
@@ -739,9 +763,10 @@ class ChatPage:
                     # Only include if it has server_mcp or auto_activate_keywords
                     caps = sys_nudge.get("capabilities") or {}
                     if caps.get("server_mcp") or sys_nudge.get("auto_activate_keywords"):
+                        uid = sys_nudge.get("uid", f"sys:{sys_key}")
                         discoverable.append({
-                            "uid": sys_uid,
-                            "name": sys_nudge.get("name", sys_uid),
+                            "uid": uid,
+                            "name": sys_nudge.get("name", sys_key),
                             "auto_discover_when": sys_nudge.get("description", ""),
                             "files": [],
                             "_system_nudge": True,
@@ -859,6 +884,8 @@ class ChatPage:
             mcp_servers=merged_mcp_servers,
         )
         entry.doc_manager = doc_manager
+        entry.base_preamble = _base_preamble
+        controller._doc_store = doc_manager.store  # For sync_document_context
 
         # Register templates globally so PPTX export works from restored chats
         if doc_manager.presentation_templates:
@@ -869,22 +896,39 @@ class ChatPage:
 
         # Wire document store notifications to WebSocket
         _auto_enabled_doc_types: set = set()
+        _unified_editor_enabled: bool = False
 
         def _doc_notify(event_type, doc):
+            nonlocal _unified_editor_enabled
+            # Rebuild Current Documents inventory in the preamble. Without
+            # this the LLM loses track of existing doc ids across turns and
+            # falls back to create_document when it should call update_document.
+            from llming_lodge.api.chat_session_api import _refresh_doc_preamble
+            _refresh_doc_preamble(controller, entry)
             asyncio.ensure_future(controller._send({
                 "type": event_type,
                 "document": doc.model_dump(),
             }))
-            if event_type == "doc_created" and doc.type not in _auto_enabled_doc_types:
-                _auto_enabled_doc_types.add(doc.type)
-                asyncio.ensure_future(_auto_enable_doc_tools(doc.type))
+            if event_type == "doc_created":
+                if doc.type not in _auto_enabled_doc_types:
+                    _auto_enabled_doc_types.add(doc.type)
+                    asyncio.ensure_future(_auto_enable_doc_tools(doc.type))
+                # Enable the type-agnostic Document Editor MCP on first doc,
+                # so `update_document` / `read_document` / `undo_document` are
+                # available immediately — without them the LLM has no edit
+                # path and falls back to calling create_document again.
+                if not _unified_editor_enabled:
+                    _unified_editor_enabled = True
+                    asyncio.ensure_future(_auto_enable_group("Document Editor"))
 
         async def _auto_enable_doc_tools(doc_type: str):
             from llming_docs.manager import _MCP_SERVERS
             spec = _MCP_SERVERS.get(doc_type)
             if not spec:
                 return
-            group_label = spec["label"]
+            await _auto_enable_group(spec["label"])
+
+        async def _auto_enable_group(group_label: str):
             server_groups = getattr(controller.session, '_mcp_server_groups', {})
             group = server_groups.get(group_label)
             if not group:
@@ -999,6 +1043,8 @@ class ChatPage:
             email_signature=user_config.email_signature or "",
             bolt_label=ac.bolt_label,
             app_extensions=ext_manager.get_manifests(),
+            doc_icons=dict(DOC_ICONS),
+            doc_group_labels=get_mcp_group_labels(),
         )
 
         config_json = payload.model_dump_json(by_alias=True)

@@ -24,10 +24,16 @@ Object.assign(ChatApp.prototype, {
     this._consoleLogMax = 500;
     this._hookConsole();
 
-    // Document plugin registry
+    // Document plugin registry.
+    // - registerBuiltinPlugins: host-owned transient plugins (mermaid, rich_mcp,
+    //   kantini_result, followup). Defined in lodge's builtin-plugins.js.
+    // - registerLlmingDocPlugins: all document-type plugins (plotly, latex,
+    //   table, text_doc/word, presentation/powerpoint/pptx, html_sandbox,
+    //   email_draft). Defined in llming-docs and served from /doc-static/.
     this.docPlugins = window.DocPluginRegistry ? new window.DocPluginRegistry() : null;
-    if (this.docPlugins && window.registerBuiltinPlugins) {
-      window.registerBuiltinPlugins(this.docPlugins);
+    if (this.docPlugins) {
+      if (window.registerBuiltinPlugins) window.registerBuiltinPlugins(this.docPlugins);
+      if (window.registerLlmingDocPlugins) window.registerLlmingDocPlugins(this.docPlugins);
     }
 
     // Cross-block reference store
@@ -89,15 +95,17 @@ Object.assign(ChatApp.prototype, {
     //     WS connect.  Covers the slow-discovery case.
     //
     // _autoEnabledDocTypes prevents duplicate toggles across all three paths.
-    this._docGroupLabels = {
-      plotly: 'Plotly Charts', table: 'Tables',
-      text_doc: 'Text Documents', word: 'Text Documents',
-      presentation: 'Presentations', powerpoint: 'Presentations',
-      html_sandbox: 'Website', email_draft: 'Email Drafts',
-    };
+    // MCP group labels for auto-enable on first doc_created. Sourced from
+    // llming_docs.get_mcp_group_labels() via frontend config — no hard-
+    // coded type → label pairs here.
+    this._docGroupLabels = window.__CHAT_CONFIG__?.docGroupLabels || {};
     this._autoEnabledDocTypes = new Set();
 
-    // Track inline doc blocks rendered in chat for the sidebar
+    // Track inline doc blocks rendered in chat for the sidebar.
+    // Under the tool-only policy, the fenced-block render path is disabled
+    // for doc types (see DocPluginRegistry.fencedBlockAllowed). This callback
+    // still fires for tool-driven renders (via _injectToolDocBlock) and for
+    // ephemeral render plugins like mermaid / rich_mcp / kantini_result.
     if (this.docPlugins) {
       this.docPlugins.onBlockRendered((info) => {
         // Skip lightbox/preview/window re-renders — only track chat-inline blocks

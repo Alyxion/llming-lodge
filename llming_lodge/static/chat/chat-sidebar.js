@@ -50,11 +50,9 @@
       }
       // For nudge store: header will be rendered via handleNudgeMeta from server
 
-      await this._renderLoadedMessages(data.messages || []);
-      this._scrollToBottom();
-      this._restoreDraft();
-
-      // Restore documents from saved conversation or IDB
+      // Restore documents from saved conversation or IDB. Docs no longer
+      // render inline in the transcript — they populate the workspace side
+      // panel as tabs (see chat-documents.js).
       if (data.documents && data.documents.length > 0) {
         this.documents = data.documents;
       } else if (data.id) {
@@ -62,7 +60,11 @@
           this.documents = await this.idb.getDocumentsForConversation(data.id);
         } catch (_) { this.documents = []; }
       }
-      this._renderDocList();
+      this._restoreWorkspaceTabs();
+      await this._renderLoadedMessages(data.messages || []);
+      this._scrollToBottom();
+      this._restoreDraft();
+      this._renderWorkspace();
 
       // Restore files from IDB file store
       if (data.file_refs && data.file_refs.length > 0) {
@@ -448,6 +450,20 @@
       }
       this.ws.send({ type: 'load_conversation', data });
 
+      // Restore documents for this conversation from IDB, then sync to server.
+      // Always send doc_restore — even with an empty list — so the server's
+      // per-session doc store is replaced, not merged with the previous chat.
+      let restoredDocs = [];
+      if (data.documents && data.documents.length > 0) {
+        restoredDocs = data.documents;
+      } else {
+        try {
+          restoredDocs = await this.idb.getDocumentsForConversation(id) || [];
+        } catch (_) { restoredDocs = []; }
+      }
+      this.documents = restoredDocs;
+      this.ws.send({ type: 'doc_restore', documents: restoredDocs });
+
       // Restore files from IDB to server — deferred until session_id_updated
       // arrives so the upload manager exists under the correct session ID.
       if (data.file_refs && data.file_refs.length > 0) {
@@ -459,10 +475,12 @@
       if (!this.chatVisible) this.showChat();
       else if (this._activeView !== 'chat') this._switchView('chat');
       this._blockDataStore?.clear();
-      this.documents = [];
       this.inlineDocBlocks = [];
+      this.openTabIds = [];
+      this.activeTabId = null;
       this._closeWorkspace();
-      this._renderDocList();
+      this._restoreWorkspaceTabs();
+      this._renderWorkspace();
       this.el.messages.innerHTML = '';
 
       // Show nudge header if this conversation belongs to a nudge

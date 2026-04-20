@@ -43,6 +43,33 @@ from llming_lodge.i18n import t_chat
 logger = logging.getLogger(__name__)
 
 
+# Tool-only policy: these fenced code-block languages are forbidden in
+# assistant responses. The authoritative list is owned by llming-docs — any
+# new document type added there automatically extends the policy without
+# host code changes. See llming_docs.frontend.FORBIDDEN_FENCED_DOC_LANGS.
+from llming_docs import FORBIDDEN_FENCED_DOC_LANGS as _FORBIDDEN_FENCED_DOC_LANGS
+_FENCED_DOC_BLOCK_RE = re.compile(
+    r"```(?:" + "|".join(_FORBIDDEN_FENCED_DOC_LANGS) + r")\b[^\n]*\n.*?```",
+    re.DOTALL,
+)
+
+
+def _strip_fenced_doc_blocks(text: str) -> str:
+    """Remove forbidden fenced doc-type blocks from assistant text.
+
+    The tool-only policy forbids the LLM from emitting fenced ``` ``text_doc`` ```
+    / ``` ``plotly`` ``` / etc. blocks. When it does anyway, strip them so the
+    user doesn't see raw JSON. A log line with the count is emitted to surface
+    model misbehaviour in dev.
+    """
+    if not text or "```" not in text:
+        return text
+    stripped, n = _FENCED_DOC_BLOCK_RE.subn("", text)
+    if n:
+        logger.info("[POLICY] stripped %d forbidden fenced doc block(s) from response", n)
+    return stripped
+
+
 # ── API Keys collection helper ──────────────────────────────────────
 
 _api_keys_coll_cache = None
@@ -984,6 +1011,25 @@ class SessionEntry(BaseSessionEntry):
     upload_manager: Optional[UploadManager] = None
     mcp_servers: Optional[List[MCPServerConfig]] = None
     doc_manager: Optional[Any] = None
+    # Preamble without the doc-manager-generated section. Lets the server
+    # rebuild the dynamic "Current Documents" inventory on restore without
+    # losing the user's base preamble text.
+    base_preamble: str = ""
+
+
+def _refresh_doc_preamble(controller, entry: "SessionEntry") -> None:
+    """Rebuild the session context preamble from the current doc store.
+
+    The dynamic section (Current Documents inventory) changes whenever docs
+    are created / updated / deleted / restored. Call this after any such
+    mutation so the next turn sees the fresh inventory.
+    """
+    if entry.doc_manager is None:
+        return
+    merged = (entry.base_preamble or "") + entry.doc_manager.get_preamble()
+    controller.context_preamble = merged
+    if controller.session is not None:
+        controller.session._context_preamble = merged
 
 
 class SessionRegistry(BaseSessionRegistry["SessionEntry"]):
@@ -1524,40 +1570,33 @@ class WebSocketChatController(ChatController):
             except Exception as e:
                 logger.warning("[RICH_MCP] Failed to track blocks for serialization: %s", e)
 
-        # Append document-store blocks (e.g. plotly charts from math MCP)
-        # as fenced code blocks so they survive conversation reload.
+        # Track doc blocks for IndexedDB serialization only (no fenced-block
+        # injection into full_text — fenced doc blocks are forbidden under the
+        # tool-only policy and are stripped from assistant content below).
+        # The client uses tool_calls.result.document_id at reload time to
+        # re-inject doc previews; see _reinjectToolDocBlocks in chat-documents.js.
+        combined_blocks: list[tuple[str, dict]] = []
         if self._pending_doc_blocks:
-            doc_blocks = list(self._pending_doc_blocks)
-            for doc_type, block_data in doc_blocks:
-                block_json = json.dumps(block_data, ensure_ascii=False)
-                logger.info("[RESP_DONE] doc block type=%s: %d bytes (%.1f KB)",
-                            doc_type, len(block_json), len(block_json) / 1024)
-                full_text += f"\n\n```{doc_type}\n{block_json}\n```"
+            combined_blocks.extend(self._pending_doc_blocks)
             self._pending_doc_blocks.clear()
-            logger.info("[RESP_DONE] full_text after doc injection: %d chars (%.1f KB)",
-                        len(full_text), len(full_text) / 1024)
-            # Track for IndexedDB serialization (like rich_mcp blocks)
-            try:
-                if self.session.history.messages:
-                    last_msg = self.session.history.messages[-1]
-                    if last_msg.role == Role.ASSISTANT:
-                        self._message_doc_blocks[id(last_msg)] = doc_blocks
-            except Exception as e:
-                logger.warning("[DOC_BLOCKS] Failed to track for serialization: %s", e)
-
-        # Track persist-only doc blocks (already rendered live, need serialization only)
         persist_only = getattr(self, '_persist_only_doc_blocks', None)
         if persist_only:
-            all_doc_blocks = list(persist_only)
+            combined_blocks.extend(persist_only)
             self._persist_only_doc_blocks.clear()
+        if combined_blocks:
             try:
                 if self.session.history.messages:
                     last_msg = self.session.history.messages[-1]
                     if last_msg.role == Role.ASSISTANT:
                         existing = self._message_doc_blocks.get(id(last_msg), [])
-                        self._message_doc_blocks[id(last_msg)] = existing + all_doc_blocks
+                        self._message_doc_blocks[id(last_msg)] = existing + combined_blocks
             except Exception as e:
-                logger.warning("[DOC_BLOCKS] Failed to track persist-only blocks: %s", e)
+                logger.warning("[DOC_BLOCKS] Failed to track for serialization: %s", e)
+
+        # Tool-only policy: strip any fenced doc-type blocks the LLM emitted
+        # into the response text. They would otherwise show as raw JSON on the
+        # client (fenced doc rendering is disabled) and confuse the user.
+        full_text = _strip_fenced_doc_blocks(full_text)
 
         # Process generated image
         generated_image = None
@@ -2193,13 +2232,20 @@ class WebSocketChatController(ChatController):
     # ── Document context sync (mirrors ChatView._sync_document_context) ───
 
     def sync_document_context(self, upload_manager: Optional[UploadManager]) -> None:
-        """Rebuild system prompt = base prompt + attached document texts."""
+        """Rebuild system prompt = base prompt + attached document texts.
+
+        Collects injectable text from two sources:
+        1. UploadManager files (uploaded/preset files with text_content)
+        2. DocumentSessionStore documents with inject_mode="full"
+
+        Both are merged, deduplicated by name, and truncated to the token budget.
+        """
         from llming_lodge.documents import extract_text, truncate_to_token_budget
 
         raw_base = self._base_system_prompt or self.system_prompt or ""
 
         # Prepend master prompt (always present, survives nudge switches)
-        master = getattr(self, "_master_prompt", "") or ""
+        master = self._master_prompt if isinstance(self._master_prompt, str) else ""
         base = (master + "\n\n" + raw_base).strip() if master else raw_base
 
         # Strip any previous document section
@@ -2211,40 +2257,59 @@ class WebSocketChatController(ChatController):
         # Dynamic budget: 30% of model context, capped at 150k tokens
         doc_token_budget = min(int(self.max_input_tokens * 0.30), 150_000)
 
-        doc_section = ""
+        raw_docs: list[tuple[str, str]] = []
+        seen_names: set[str] = set()
+
+        # Source 1: UploadManager files (existing path)
         if upload_manager:
-            raw_docs = []
             for f in upload_manager.files:
                 if f.mime_type.startswith("image/"):
                     continue
                 if not f.text_content and f.raw_data:
                     f.text_content = extract_text(f.raw_data, f.mime_type)
-                raw_docs.append((f.name, f.text_content))
-            if raw_docs:
-                result = truncate_to_token_budget(raw_docs, max_tokens=doc_token_budget)
-                doc_texts = [f"### {name}\n{text}" for name, text in result.documents]
-                doc_section = marker + "\n" + "\n\n".join(doc_texts)
+                if f.text_content:
+                    raw_docs.append((f.name, f.text_content))
+                    seen_names.add(f.name)
 
-                # Notify user if documents were truncated
-                if result.was_truncated:
-                    pages_estimate = result.total_tokens_before // 500
-                    budget_k = doc_token_budget // 1000
-                    import asyncio
-                    asyncio.ensure_future(self._send({
-                        "type": "notification",
-                        "message": (
-                            f"Document limit of {budget_k}k tokens exceeded "
-                            f"(~{pages_estimate} pages). Some content was truncated."
-                        ),
-                        "level": "negative",
-                    }))
+        # Source 2: Document store — docs with inject_mode="full"
+        from llming_docs.document_store import DocumentSessionStore
+        _store = self._doc_store if isinstance(self._doc_store, DocumentSessionStore) else None
+        doc_store = _store
+        if doc_store:
+            for doc in doc_store.list_all():
+                if doc.inject_mode == "full" and doc.name not in seen_names:
+                    text = ""
+                    if isinstance(doc.data, dict):
+                        text = doc.data.get("text_content", "")
+                    if text:
+                        raw_docs.append((doc.name, text))
+
+        doc_section = ""
+        if raw_docs:
+            result = truncate_to_token_budget(raw_docs, max_tokens=doc_token_budget)
+            doc_texts = [f"### {name}\n{text}" for name, text in result.documents]
+            doc_section = marker + "\n" + "\n\n".join(doc_texts)
+
+            # Notify user if documents were truncated
+            if result.was_truncated:
+                pages_estimate = result.total_tokens_before // 500
+                budget_k = doc_token_budget // 1000
+                import asyncio
+                asyncio.ensure_future(self._send({
+                    "type": "notification",
+                    "message": (
+                        f"Document limit of {budget_k}k tokens exceeded "
+                        f"(~{pages_estimate} pages). Some content was truncated."
+                    ),
+                    "level": "negative",
+                }))
 
         self._base_system_prompt = base
         final_prompt = base + doc_section
-        logger.info("[SYNC_DOC] base=%d chars, doc_section=%d chars, final=%d chars, files=%d, budget=%dk",
+        file_count = (len(upload_manager.files) if upload_manager else 0) + len(raw_docs)
+        logger.info("[SYNC_DOC] base=%d chars, doc_section=%d chars, final=%d chars, sources=%d, budget=%dk",
                      len(base), len(doc_section), len(final_prompt),
-                     len(upload_manager.files) if upload_manager else 0,
-                     doc_token_budget // 1000)
+                     file_count, doc_token_budget // 1000)
         self.update_settings(system_prompt=final_prompt)
 
     # ── Conversation serialization (mirrors ChatSessionHandler) ───
@@ -2928,6 +2993,8 @@ async def _handle_client_message(
             _sn_bolts = _sn.get("bolts", [])
             if _sn_bolts:
                 _bolt_bundles.append((_sn.get("uid", f"sys:{_sn_key}"), _sn_bolts))
+
+        # /rooms bolt is registered via RoomsExtension (app_extensions)
 
         # (b) Master nudges (already loaded on controller during page setup)
         for _mn in getattr(controller, "_master_nudges_raw", []):
@@ -3959,6 +4026,11 @@ async def _handle_client_message(
             entry.doc_manager.store.restore_from_list(msg["documents"])
             # Auto-enable per-type editing tools for restored document types
             await _auto_enable_restored_doc_tools(controller, msg["documents"])
+            # Rebuild preamble so the "Current Documents" inventory reflects
+            # the restored docs; without this the LLM can't tell which docs
+            # exist after a conversation switch and falls back to recreating.
+            _refresh_doc_preamble(controller, entry)
+
 
     # ── Browser-hosted MCP messages ───────────────────────
     elif msg_type == "browser_mcp_result":
@@ -4129,12 +4201,7 @@ async def _handle_client_message(
                 })
 
     else:
-        # Check for custom WS message handlers registered by external code
-        custom_handlers = getattr(controller, "_custom_ws_handlers", None)
-        if custom_handlers and msg_type in custom_handlers:
-            await custom_handlers[msg_type](msg, controller)
-        else:
-            logger.warning(f"[WS] Unknown message type: {msg_type}")
+        logger.warning(f"[WS] Unknown message type: {msg_type}")
 
 
 async def _apply_doc_plugins(
@@ -4230,19 +4297,21 @@ async def _auto_enable_restored_doc_tools(
 
     # Map doc type → MCP group label (which is the toggle_tool name for collapsed groups)
     changed = False
-    for doc_type in doc_types:
-        spec = _MCP_SERVERS.get(doc_type)
-        if not spec:
-            continue
-        group_label = spec["label"]
-        # toggle_tool with group label toggles all tools in the group
-        server_groups = getattr(controller.session, '_mcp_server_groups', {})
+    groups_to_enable = {spec["label"] for dt in doc_types
+                        if (spec := _MCP_SERVERS.get(dt)) is not None}
+    # Also enable the type-agnostic Document Editor MCP (update/read/undo) —
+    # restoring a conversation implies the LLM will likely edit existing docs.
+    groups_to_enable.add("Document Editor")
+
+    server_groups = getattr(controller.session, '_mcp_server_groups', {})
+    for group_label in groups_to_enable:
         group = server_groups.get(group_label)
-        if group:
-            all_group_tools = group.get("tool_names", [])
-            if not any(tn in controller.enabled_tools for tn in all_group_tools):
-                controller.toggle_tool(group_label, True)
-                changed = True
+        if not group:
+            continue
+        all_group_tools = group.get("tool_names", [])
+        if not any(tn in controller.enabled_tools for tn in all_group_tools):
+            controller.toggle_tool(group_label, True)
+            changed = True
 
     if changed and controller._ws:
         await controller._send({

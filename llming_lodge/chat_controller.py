@@ -67,6 +67,7 @@ class ChatController(ABC):
         self.budget_handler = budget_handler
         self.mcp_servers = mcp_servers or []
         self._message_tool_calls: dict[int, list[dict]] = {}
+        self._doc_store = None  # Set by chat_page after session creation
 
         # Get available models
         available_llms = list(llm_manager.get_available_llms())

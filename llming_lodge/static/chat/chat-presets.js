@@ -524,8 +524,10 @@
 
             ${this.config.docPlugins && this.config.docPlugins.length > 0 ? (() => {
               const allTypes = this.config.docPlugins;
-              const DOC_ICONS = { plotly: 'bar_chart', latex: 'functions', table: 'table_chart', text_doc: 'description', word: 'description', presentation: 'slideshow', powerpoint: 'slideshow', html: 'web', email_draft: 'mail' };
-              const DOC_LABELS = { plotly: 'Plotly Charts', latex: 'LaTeX Formulas', table: 'Data Tables', text_doc: 'Text Documents', word: 'Text Documents', presentation: 'Presentations', powerpoint: 'Presentations', html: 'Website', email_draft: 'Email Drafts' };
+              // Icons + labels come from llming-docs via chat config — no
+              // type/label mappings live in the host anymore.
+              const DOC_ICONS = this.config.docIcons || {};
+              const DOC_LABELS = this.config.docGroupLabels || {};
               const enabledSet = data.doc_plugins ? new Set(data.doc_plugins) : null;
               return `
               <label class="cv2-preset-label">${this.t('chat.preset_doc_plugins') || 'Document Plugins'}</label>

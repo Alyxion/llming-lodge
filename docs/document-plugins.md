@@ -637,7 +637,7 @@ Each document type (except LaTeX) exposes MCP tools that let the LLM read and mo
 Use `DocPluginManager` to control which document types are available:
 
 ```python
-from llming_lodge.doc_plugins.manager import DocPluginManager
+from llming_docs.manager import DocPluginManager
 
 # All types enabled (default)
 manager = DocPluginManager()

@@ -224,7 +224,6 @@ class ChatUserConfig(BaseModel):
     on_message_intercept: Any = None  # async (text, controller) -> str|None — intercept before LLM
     on_new_chat: Any = None  # async (controller) -> None — cleanup on new chat
     app_extensions: list[Any] = Field(default_factory=list)  # list of AppExtension instances (lazy-loaded on demand)
-    custom_ws_handlers: dict[str, Any] = Field(default_factory=dict)  # msg_type → async (msg, controller) handlers for custom WS message types
 
 
 class TeamInfo(BaseModel):
@@ -275,3 +274,7 @@ class ChatFrontendConfig(BaseModel):
     email_signature: str = ""  # HTML email signature for toolbar insertion
     bolt_label: str = "Bolts"  # UI label for bolts (host app can rename, e.g. "Jets")
     app_extensions: list[dict] = Field(default_factory=list)  # [{name, label, icon, scriptUrl}] — available extensions (loaded on demand)
+    # Document-type metadata sourced from llming_docs.frontend.MANIFEST.
+    # The host should never hard-code this — read from the config at runtime.
+    doc_icons: dict[str, str] = Field(default_factory=dict)  # {type: material-icon-name}
+    doc_group_labels: dict[str, str] = Field(default_factory=dict)  # {type: MCP-group-label}

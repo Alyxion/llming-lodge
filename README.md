@@ -55,6 +55,14 @@ cp .env.example .env   # add your API keys
 llming-lodge            # starts on https://localhost:8443
 ```
 
+## Auth
+
+Lodge doesn't own auth logic — it reads cookie names and verifies tokens through the shared `llming_com.get_auth()` singleton. That singleton is the same one used by any sibling page in the host (e.g. an llming-hub landing page), so **sign-in at one page carries over to the chat page without a second OAuth round-trip**.
+
+- Lodge's `chat_page.py` reads `auth.session_cookie_name` / `auth.auth_cookie_name` / `auth.identity_cookie_name` from the instance — never from module-level constants.
+- The host application is responsible for running the OAuth flow and setting the cookies on `path="/"` so every page under the domain can see them.
+- See llming-com's [Unified auth across pages](../llming-com/README.md#unified-auth-across-pages) for the full flow and the `app_name` pattern for multi-app isolation on shared domains.
+
 ## Configuration
 
 Copy `.env.example` and add the provider keys you need:
